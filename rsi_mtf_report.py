@@ -19,9 +19,12 @@ OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 # USER CONFIG
 # ═════════════════════════════════════════════════════════════════════════════
 
-LOCAL_NSE_CSV       = "EQUITY_L.csv"
+LOCAL_NSE_CSV       = "india/NSE/NSECash/EQUITY_L.csv"
 NSE_CSV_URL         = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-SERIES_FILTER       = ["EQ"]
+SERIES_FILTER       = ["EQ"]       # NSE equity series (EQ = cash equities)
+
+LOCAL_SME_CSV       = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
+SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 80
@@ -56,6 +59,37 @@ NIFTY50 = [
     "BRITANNIA","TATACONSUM","TATAMOTORS","M&M","HINDALCO","GRASIM","JSWSTEEL",
     "APOLLOHOSP","BPCL","INDUSINDBK","LTIM","HDFCLIFE","SBILIFE","COALINDIA",
 ]
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTO-INSTALL MISSING LIBRARIES
+# ═════════════════════════════════════════════════════════════════════════════
+
+import sys
+import subprocess
+
+def install_missing_packages():
+    required = {
+        'yfinance': 'yfinance',
+        'pandas': 'pandas',
+        'numpy': 'numpy',
+        'matplotlib': 'matplotlib',
+        'requests': 'requests',
+        'openpyxl': 'openpyxl',
+    }
+
+    missing = []
+    for pkg_name, import_name in required.items():
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(pkg_name)
+
+    if missing:
+        print(f"Installing missing packages: {', '.join(missing)}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+        print("✓ Packages installed successfully\n")
+
+install_missing_packages()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # IMPORTS
@@ -133,9 +167,51 @@ def log_warn(ticker: str, company: str, msg: str):
 
 _COMPANY_MAP: dict[str, str] = {}   # populated by load_universe()
 _LISTING_DATE_MAP: dict[str, str] = {}   # symbol → listing date string
+_SME_STOCKS: set[str] = set()   # set of SME stock symbols
+_SECTOR_MAP: dict[str, str] = {}   # symbol → sector/industry name
+_INDEX_MAP: dict[str, set[str]] = {}   # index name → set of symbols in that index
+_MARKETCAP_MAP: dict[str, float] = {}   # symbol → market cap in rupees
 
 def get_company_name(ticker: str) -> str:
     return _COMPANY_MAP.get(ticker, ticker)
+
+def is_sme_stock(ticker: str) -> bool:
+    return ticker in _SME_STOCKS
+
+def get_sector(ticker: str) -> str | None:
+    return _SECTOR_MAP.get(ticker)
+
+def get_indices(ticker: str) -> list[str]:
+    """Get list of indices this stock belongs to."""
+    result = []
+    for idx_name, symbols in _INDEX_MAP.items():
+        if ticker in symbols:
+            result.append(idx_name)
+    return result
+
+def get_marketcap(ticker: str) -> float | None:
+    """Get market cap in rupees."""
+    return _MARKETCAP_MAP.get(ticker)
+
+def categorize_marketcap(marketcap: float | None) -> tuple[str, str]:
+    """Categorize stock by market cap. Returns (category, css_class).
+    Market cap in INR:
+    - Large Cap: > 20,000 crore
+    - Mid Cap: 5,000 - 20,000 crore
+    - Small Cap: 500 - 5,000 crore
+    - Micro Cap: < 500 crore
+    """
+    if marketcap is None:
+        return "Unknown", "cap-unknown"
+    cap_crore = marketcap / 1e7  # Convert to crores
+    if cap_crore > 200000:       # > 20,000 cr
+        return "Large Cap", "cap-large"
+    elif cap_crore > 50000:      # 5,000-20,000 cr
+        return "Mid Cap", "cap-mid"
+    elif cap_crore > 5000:       # 500-5,000 cr
+        return "Small Cap", "cap-small"
+    else:                        # < 500 cr
+        return "Micro Cap", "cap-micro"
 
 def get_listing_date(ticker: str) -> str | None:
     return _LISTING_DATE_MAP.get(ticker)
@@ -175,10 +251,13 @@ def _build_company_map(text: str):
         name = row.get("NAME OF COMPANY", row.get("COMPANY NAME", "")).strip()
         # Handle column names with leading spaces
         date_str = row.get("DATE OF LISTING", row.get(" DATE OF LISTING", "")).strip()
+        sector = row.get("INDUSTRY", row.get(" INDUSTRY", "")).strip()
         if sym:
             _COMPANY_MAP[sym] = name or sym
             if date_str:
                 _LISTING_DATE_MAP[sym] = date_str
+            if sector:
+                _SECTOR_MAP[sym] = sector
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -442,32 +521,120 @@ BUILTIN = [
     "HDFCAMC","NIPPONLIFE","ABSLAMC","SBICARD","OBEROIRLTY","PRESTIGE","BRIGADE",
 ]
 
-def _parse_nse_csv(text: str) -> list[str]:
+def _populate_indices():
+    """Populate index membership from built-in NIFTY50 list."""
+    _INDEX_MAP["NIFTY50"] = set(NIFTY50)
+
+def _parse_nse_csv(text: str, series_filters: list[str], is_sme: bool = False) -> list[str]:
+    import re
+    
+    # Fix malformed CSV with embedded newlines in quoted field names
+    # The SME CSV has headers like: "SYMBOL \n","SERIES \n" which breaks CSV parsing
+    text = text.lstrip('\ufeff')  # Remove BOM if present
+    
+    if is_sme:
+        # SURGICAL FIX: Identify and fix header line only
+        # Strategy: Find where first stock symbol appears, then extract header before it
+        # Then fix the embedded \n in that header line
+        
+        # Look for the first stock symbol pattern (starting with uppercase letter)
+        # First data row starts with quote: "SYMBOL_NAME"
+        # We'll look for a known pattern: after header closing quote, we have \n then first stock
+        
+        # Find where actual data line starts (look for first quote followed by stock symbol)
+        # Safe approach: find the last \n that comes before the first non-header row
+        # The first data row has the first stock in it (e.g., "ADISOFT")
+        
+        # Since we don't know stock names, find pattern: `\n"` followed by quoted data
+        # Better: the header is ONE line with embedded \n, then real data starts
+        # Find the end of header by looking for the pattern where quoted field ends before real \n
+        
+        # Simplest: replace all ` \n` (space-newline) with space in one pass
+        # This targets the specific pattern in field names like "SYMBOL \n"
+        text = re.sub(r' \n', ' ', text)
+    
+    # NOW parse the (hopefully fixed) CSV
     _build_company_map(text)
+    
     reader, tickers = csv.DictReader(io.StringIO(text)), []
+    series_seen = set()   # track unique SERIES values found (for debug)
+
     for row in reader:
-        series = row.get(" SERIES", row.get("SERIES", "")).strip()
-        symbol = row.get("SYMBOL", "").strip()
-        if symbol and series in SERIES_FILTER:
-            tickers.append(symbol)
+        if not row:  # Skip empty rows
+            continue
+        # Sanitize row keys by stripping whitespace
+        clean_row = {}
+        for k, v in row.items():
+            if k:
+                clean_row[k.strip()] = (v.strip() if isinstance(v, str) else v)
+        series = clean_row.get("SERIES", "").strip()
+        symbol = clean_row.get("SYMBOL", "").strip()
+
+        if series:
+            series_seen.add(series)
+
+        if is_sme:
+            # ── SME-dedicated CSV: the ENTIRE file is SME stocks ──────────
+            # Accept every row that has a non-empty, non-numeric SYMBOL.
+            # We deliberately ignore series_filters here because:
+            #   • The file is already filtered to SME at the NSE-export level
+            #   • Series codes vary (SM, ST, BE, …) and a mismatch silently
+            #     drops all SME stocks, giving n_sme = 0 in the HTML.
+            if symbol and not symbol.isdigit():
+                tickers.append(symbol)
+                _SME_STOCKS.add(symbol)
+        else:
+            if symbol and series in series_filters:
+                tickers.append(symbol)
+
+    if is_sme:
+        print(f"  [SME] Series codes found in CSV : {sorted(series_seen) or '(none)'}")
+        print(f"  [SME] Symbols loaded into _SME_STOCKS : {len(_SME_STOCKS)}")
+
     return tickers
 
 def load_universe() -> list[str]:
     global _CACHE
+    _populate_indices()  # Populate index membership mapping
     _CACHE = _load_cache()
 
+    all_tickers = []
+
+    # Load NSE EQ stocks
     if os.path.exists(LOCAL_NSE_CSV):
         try:
             with open(LOCAL_NSE_CSV, encoding="utf-8", errors="replace") as f:
                 raw = f.read()
-            t = _parse_nse_csv(raw)
+            t = _parse_nse_csv(raw, SERIES_FILTER, is_sme=False)
             if t:
                 print(f"  ✅ Local '{LOCAL_NSE_CSV}': {len(t)} EQ stocks | "
                       f"{len(_COMPANY_MAP)} companies mapped")
-                return t
+                all_tickers.extend(t)
         except Exception as e:
-            print(f"  [!] Local CSV error: {e}")
+            print(f"  [!] Local NSE CSV error: {e}")
 
+    # Load NSE SME stocks
+    if os.path.exists(LOCAL_SME_CSV):
+        try:
+            with open(LOCAL_SME_CSV, encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            t_sme = _parse_nse_csv(raw, SME_SERIES_FILTER, is_sme=True)
+            # Safety net: ensure every ticker returned is in _SME_STOCKS
+            for sym in t_sme:
+                _SME_STOCKS.add(sym)
+            if t_sme:
+                print(f"  ✅ Local '{LOCAL_SME_CSV}': {len(t_sme)} SME stocks"
+                      f"  |  {len(_SME_STOCKS)} total in SME set")
+                all_tickers.extend(t_sme)
+            else:
+                print(f"  ⚠️  SME CSV found but 0 symbols parsed — check CSV format")
+        except Exception as e:
+            print(f"  [!] Local SME CSV error: {e}")
+
+    if all_tickers:
+        return list(dict.fromkeys(all_tickers))  # Remove duplicates while preserving order
+
+    # Fallback to live download if local files don't exist
     try:
         s = requests.Session()
         s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "*/*"})
@@ -476,7 +643,7 @@ def load_universe() -> list[str]:
         s.headers["Referer"] = "https://www.nseindia.com/"
         r = s.get(NSE_CSV_URL, timeout=20)
         r.raise_for_status()
-        t = _parse_nse_csv(r.text)
+        t = _parse_nse_csv(r.text, SERIES_FILTER, is_sme=False)
         if t:
             print(f"  ✅ Live NSE: {len(t)} EQ stocks | {len(_COMPANY_MAP)} companies")
             try:
@@ -485,7 +652,7 @@ def load_universe() -> list[str]:
                 print(f"  💾 Saved → '{LOCAL_NSE_CSV}'")
             except Exception:
                 pass
-            return t
+            all_tickers.extend(t)
     except Exception as e:
         print(f"  [!] NSE download failed: {e}")
 
@@ -519,6 +686,15 @@ def analyze_stock(ticker: str) -> dict | None:
             log_warn(ticker, company,
                      f"Insufficient data: {len(df)} bars < {min_candles} required")
             return None
+        
+        # Extract market cap if not already cached
+        if ticker not in _MARKETCAP_MAP:
+            try:
+                info = yf.Ticker(ticker + ".NS").info
+                if 'marketCap' in info and info['marketCap']:
+                    _MARKETCAP_MAP[ticker] = float(info['marketCap'])
+            except Exception:
+                pass  # Market cap not available, will use Unknown
     except Exception as exc:
         log_error(ticker, company, "DOWNLOAD", exc)
         return None
@@ -664,6 +840,10 @@ def analyze_stock(ticker: str) -> dict | None:
         "rank_nifty50_pos": 0, "rank_nifty50_of": 0,
         "rank_univ_pos": 0,    "rank_univ_of": 0,
         "is_nifty50": False,
+        "is_sme": is_sme_stock(ticker),
+        "sector": get_sector(ticker) or "Unknown",
+        "indices": get_indices(ticker),
+        "marketcap": get_marketcap(ticker),
     }
 
 
@@ -815,36 +995,62 @@ def generate_chart(data: dict) -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 _CSS = """
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;
-      --sub:#8b949e;--green:#26d07c;--red:#ff4d6d;--gold:#ffd700;
-      --cyan:#00d4ff;--purple:#b39ddb;--orange:#ff9800}
-*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;
+  --sub:#8b949e;--green:#26d07c;--red:#ff4d6d;--gold:#ffd700;
+  --cyan:#00d4ff;--purple:#b39ddb;--orange:#ff9800;
+  --bs-body-bg:#0d1117;--bs-body-color:#c9d1d9;--bs-border-color:#30363d;
+}
+*{box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}
 a{color:var(--cyan)}
+/* Bootstrap dark overrides */
+.form-control,.form-select{background:var(--card)!important;border-color:var(--border)!important;color:var(--text)!important;font-size:12px}
+.form-control::placeholder{color:var(--sub)}
+.form-control:focus,.form-select:focus{background:var(--card)!important;border-color:var(--cyan)!important;color:var(--text)!important;box-shadow:0 0 0 .2rem rgba(0,212,255,.15)!important}
+.form-select option{background:#161b22;color:var(--text)}
+.btn-outline-secondary{color:var(--sub);border-color:var(--border);font-size:12px}
+.btn-outline-secondary:hover{background:var(--border);color:var(--text);border-color:var(--border)}
 
-/* header */
-.header{background:#010409;border-bottom:2px solid #21262d;padding:20px 28px 16px}
-.header h1{font-size:20px;font-weight:700;color:var(--cyan);letter-spacing:1px}
-.subtitle{color:var(--sub);font-size:12px;margin-top:4px}
-.stats-row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
-.stat-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 16px;min-width:110px}
+/* ── Header ─────────────────────────────────────────── */
+.app-header{background:#010409;border-bottom:2px solid #21262d;padding:18px 20px 14px}
+.app-header h1{font-size:20px;font-weight:700;color:var(--cyan);letter-spacing:1px;margin:0}
+.subtitle{color:var(--sub);font-size:11.5px;margin-top:4px}
+.stats-row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.stat-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 16px;min-width:100px;flex:1;min-width:90px;max-width:160px}
 .stat-box .val{font-size:22px;font-weight:700}
 .stat-box .lbl{font-size:10px;color:var(--sub);margin-top:2px}
 .stat-box.green .val{color:var(--green)}.stat-box.gold .val{color:var(--gold)}
 .stat-box.red .val{color:var(--red)}.stat-box.cyan .val{color:var(--cyan)}
 
-/* filter bar */
-.filter-bar{background:#010409;padding:10px 28px;border-bottom:1px solid var(--border);
-            display:flex;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:100}
-.filter-btn{background:var(--card);border:1px solid var(--border);color:var(--sub);
-            border-radius:20px;padding:5px 14px;cursor:pointer;font-size:12px;transition:all .15s}
-.filter-btn:hover,.filter-btn.active{background:var(--cyan);color:#000;border-color:var(--cyan);font-weight:600}
+/* ── Filter section ────────────────────────────────── */
+.filter-section{background:#010409;padding:10px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:1000}
+.filter-row1{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+.filter-row2{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.filter-input{flex:1;min-width:180px;max-width:260px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:5px 14px;font-size:12px;outline:none}
+.filter-input:focus{border-color:var(--cyan);box-shadow:0 0 0 2px rgba(0,212,255,.12)}
+.filter-input::placeholder{color:var(--sub)}
+.filter-select{background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;outline:none;appearance:auto}
+.filter-select:focus{border-color:var(--cyan)}
+.filter-select option{background:#161b22}
+.phase-btn{background:var(--card);border:1px solid var(--border);color:var(--sub);border-radius:20px;padding:4px 13px;cursor:pointer;font-size:12px;transition:all .15s;white-space:nowrap}
+.phase-btn:hover,.phase-btn.active{background:var(--cyan);color:#000;border-color:var(--cyan);font-weight:600}
+.clear-btn{background:transparent;border:1px solid #444;color:var(--sub);border-radius:20px;padding:4px 12px;font-size:12px;cursor:pointer;transition:all .15s}
+.clear-btn:hover{border-color:var(--red);color:var(--red)}
+.results-info{font-size:11px;color:var(--sub);margin-left:4px;white-space:nowrap}
+.results-info b{color:var(--cyan)}
+.active-chips{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:4px;background:#002d40;color:var(--cyan);border:1px solid #00d4ff33;border-radius:12px;padding:2px 10px;font-size:10.5px;font-weight:600}
+.chip .x{cursor:pointer;opacity:.7;font-size:12px;line-height:1}
+.chip .x:hover{opacity:1}
 
-/* table */
-.table-wrap{overflow-x:auto;padding:20px 28px 6px}
+/* ── Summary table ─────────────────────────────────── */
+.table-section{padding:0 20px 6px}
+.sort-hint{padding:6px 0 4px;font-size:11px;color:var(--sub)}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .sum-table{width:100%;border-collapse:collapse;font-size:11.5px}
 .sum-table th{background:#21262d;color:var(--sub);padding:7px 9px;text-align:left;
-              font-weight:600;white-space:nowrap;position:sticky;top:0}
+              font-weight:600;white-space:nowrap;position:sticky;top:0;z-index:5}
 .sum-table th[data-col]{cursor:pointer;user-select:none}
 .sum-table th[data-col]:hover{color:var(--cyan)}
 .sort-ind{display:inline-block;min-width:12px;font-size:10px;margin-left:2px;opacity:.7}
@@ -871,10 +1077,26 @@ a{color:var(--cyan)}
            font-size:10px;font-weight:700;border:1px solid #00d4ff44}
 .n50-tag{background:#1a0d30;color:var(--purple);border-radius:8px;padding:1px 7px;
          font-size:10px;font-weight:700;border:1px solid #b39ddb44}
+.sme-tag{background:#1a2d0d;color:#4caf50;border-radius:8px;padding:1px 7px;
+         font-size:10px;font-weight:700;border:1px solid #4caf5044}
+.index-tag{background:#0d2440;color:#03a9f4;border-radius:8px;padding:1px 7px;
+           font-size:10px;font-weight:700;border:1px solid #03a9f444}
+.sector-tag{background:#2d1a0d;color:#ff9800;border-radius:8px;padding:1px 7px;
+            font-size:10px;font-weight:700;border:1px solid #ff980044}
+.cap-large{background:#0d1a2d;color:#4caf50;border-radius:8px;padding:1px 7px;
+           font-size:10px;font-weight:700;border:1px solid #4caf5044}
+.cap-mid{background:#1a2d0d;color:#8bc34a;border-radius:8px;padding:1px 7px;
+         font-size:10px;font-weight:700;border:1px solid #8bc34a44}
+.cap-small{background:#2d2d0d;color:#fdd835;border-radius:8px;padding:1px 7px;
+           font-size:10px;font-weight:700;border:1px solid #fdd83544}
+.cap-micro{background:#2d1a1a;color:#ff6f00;border-radius:8px;padding:1px 7px;
+           font-size:10px;font-weight:700;border:1px solid #ff6f0044}
+.cap-unknown{background:#1a1a1a;color:#888;border-radius:8px;padding:1px 7px;
+             font-size:10px;font-weight:700;border:1px solid #88888844}
 
-/* ── CARDS — native <details> expand/collapse ──────── */
-.cards-section{padding:14px 28px 36px}
-.cards-section>h2{font-size:13px;color:var(--sub);margin-bottom:12px;letter-spacing:1px}
+/* ── Cards ──────────────────────────────────────────── */
+.cards-section{padding:12px 20px 40px}
+.cards-section>h2{font-size:13px;color:var(--sub);margin-bottom:10px;letter-spacing:1px}
 
 details.stock-card{background:var(--card);border:1px solid var(--border);
                    border-radius:10px;margin-bottom:20px;overflow:hidden}
@@ -954,98 +1176,200 @@ details.detail-panel[open]>summary::after{transform:rotate(180deg);display:inlin
 .sig-item:last-child{border-bottom:none}
 .sig-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 
-/* footer */
+/* ── Footer ─────────────────────────────────────────── */
 .footer{text-align:center;padding:18px;color:var(--sub);
         font-size:11px;border-top:1px solid var(--border)}
-
 /* sort hint */
-.sort-hint{padding:5px 28px 3px;font-size:11px;color:var(--sub)}
+.sort-hint{padding:5px 0 3px;font-size:11px;color:var(--sub)}
+/* mobile */
+@media(max-width:600px){
+  .app-header{padding:14px 14px 12px}
+  .filter-section{padding:8px 14px}
+  .cards-section{padding:10px 14px 30px}
+  .table-section{padding:0 14px 4px}
+  .card-ticker{font-size:14px}
+  .stat-box{min-width:75px;padding:8px 10px}
+  .stat-box .val{font-size:18px}
+}
 """
 
 # Lazy chart JS: PNGs are loaded from data-src on first open
 _JS = """
-// ── Filter ───────────────────────────────────────────────────────
-function filterPhase(phase, btn) {
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  const isAll = phase === 'all';
+// ── Active filter state ───────────────────────────────────────────
+const F = { phase:'all', cap:'all', sector:'all', index:'all', search:'' };
+
+// ── Apply all filters ─────────────────────────────────────────────
+function applyFilters() {
+  let vis = 0;
   document.querySelectorAll('details.stock-card').forEach(c => {
-    const show = isAll || c.dataset.phase === phase ||
-                 (phase === 'fresh' && c.dataset.fresh === '1') ||
-                 (phase === 'nifty50' && c.dataset.nifty === '1');
+    const show = matchCard(c);
     c.style.display = show ? '' : 'none';
+    if (show) vis++;
   });
   document.querySelectorAll('.sum-row').forEach(r => {
-    const show = isAll || r.dataset.phase === phase ||
-                 (phase === 'fresh'  && r.dataset.fresh  === '1') ||
-                 (phase === 'nifty50'&& r.dataset.nifty  === '1');
-    r.style.display = show ? '' : 'none';
+    r.style.display = matchRow(r) ? '' : 'none';
   });
+  const rc = document.getElementById('rc');
+  if (rc) rc.textContent = vis;
+  renderChips();
 }
 
-// ── Multi-column sort ────────────────────────────────────────────
+function matchCard(c) {
+  const d = c.dataset;
+  if (F.phase !== 'all') {
+    if (F.phase === 'fresh'   && d.fresh  !== '1') return false;
+    if (F.phase === 'nifty50' && d.nifty  !== '1') return false;
+    if (F.phase === 'sme'     && d.sme    !== '1') return false;
+    if (!['fresh','nifty50','sme'].includes(F.phase) && d.phase !== F.phase) return false;
+  }
+  if (F.cap    !== 'all' && d.cap    !== F.cap)    return false;
+  if (F.sector !== 'all' && d.sector !== F.sector) return false;
+  if (F.index  !== 'all') {
+    const idxs = (d.indices||'').split(',').map(s=>s.trim()).filter(Boolean);
+    if (!idxs.includes(F.index)) return false;
+  }
+  if (F.search) {
+    const q = F.search.toLowerCase();
+    if (!(d.ticker||'').toLowerCase().includes(q) && !(d.company||'').toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+
+function matchRow(r) {
+  const d = r.dataset;
+  if (F.phase !== 'all') {
+    if (F.phase === 'fresh'   && d.fresh  !== '1') return false;
+    if (F.phase === 'nifty50' && d.nifty  !== '1') return false;
+    if (F.phase === 'sme'     && d.sme    !== '1') return false;
+    if (!['fresh','nifty50','sme'].includes(F.phase) && d.phase !== F.phase) return false;
+  }
+  if (F.cap    !== 'all' && d.cap    !== F.cap)    return false;
+  if (F.sector !== 'all' && d.sector !== F.sector) return false;
+  if (F.index  !== 'all') {
+    const idxs = (d.indices||'').split(',').map(s=>s.trim()).filter(Boolean);
+    if (!idxs.includes(F.index)) return false;
+  }
+  if (F.search) {
+    const q = F.search.toLowerCase();
+    if (!(d.ticker||'').toLowerCase().includes(q) && !(d.company||'').toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+
+// Phase quick buttons
+function filterPhase(phase, btn) {
+  document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  F.phase = phase;
+  applyFilters();
+}
+
+// Dropdown changes
+function onDropChange() {
+  F.cap    = document.getElementById('capSel').value;
+  F.sector = document.getElementById('secSel').value;
+  F.index  = document.getElementById('idxSel').value;
+  applyFilters();
+}
+
+// Search (debounced)
+let _st = null;
+function onSearch(v) {
+  clearTimeout(_st);
+  _st = setTimeout(() => { F.search = v.trim(); applyFilters(); }, 220);
+}
+
+// Clear all filters
+function clearAll() {
+  Object.assign(F, { phase:'all', cap:'all', sector:'all', index:'all', search:'' });
+  ['capSel','secSel','idxSel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = 'all';
+  });
+  const si = document.getElementById('searchInp');
+  if (si) si.value = '';
+  document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');
+  applyFilters();
+}
+
+// Chip display
+const CAP_LABELS = {'cap-large':'Large Cap','cap-mid':'Mid Cap','cap-small':'Small Cap','cap-micro':'Micro Cap'};
+function renderChips() {
+  const c = document.getElementById('chips');
+  if (!c) return;
+  const chips = [];
+  if (F.phase !== 'all')  chips.push([`Phase: ${F.phase}`, ()=>{F.phase='all'; document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active')); document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');}]);
+  if (F.cap   !== 'all')  chips.push([CAP_LABELS[F.cap]||F.cap, ()=>{F.cap='all'; document.getElementById('capSel').value='all';}]);
+  if (F.sector!== 'all')  chips.push([F.sector, ()=>{F.sector='all'; document.getElementById('secSel').value='all';}]);
+  if (F.index !== 'all')  chips.push([F.index,  ()=>{F.index='all';  document.getElementById('idxSel').value='all';}]);
+  if (F.search)           chips.push([`"${F.search}"`, ()=>{F.search=''; document.getElementById('searchInp').value='';}]);
+  c.innerHTML = chips.map((_, i) =>
+    `<span class="chip">${chips[i][0]} <span class="x" onclick="(${chips[i][1].toString()})();applyFilters()">✕</span></span>`
+  ).join('');
+}
+
+// ── Multi-column sort ──────────────────────────────────────────────
 let sortKeys = [];
 function sortTable(col, e) {
   const shift = e && e.shiftKey;
   if (!shift) {
-    const ex = sortKeys.find(k => k.col === col);
-    const nd = (ex && sortKeys[0].col === col && ex.dir === 'desc') ? 'asc' : 'desc';
-    sortKeys = [{col, dir: nd}];
+    const ex = sortKeys.find(k=>k.col===col);
+    const nd = (ex && sortKeys[0].col===col && ex.dir==='desc') ? 'asc' : 'desc';
+    sortKeys = [{col, dir:nd}];
   } else {
-    const idx = sortKeys.findIndex(k => k.col === col);
-    if (idx === -1) { if (sortKeys.length < 3) sortKeys.push({col, dir:'desc'}); }
-    else if (sortKeys[idx].dir === 'desc') sortKeys[idx].dir = 'asc';
-    else sortKeys.splice(idx, 1);
+    const idx = sortKeys.findIndex(k=>k.col===col);
+    if (idx===-1) { if (sortKeys.length<3) sortKeys.push({col,dir:'desc'}); }
+    else if (sortKeys[idx].dir==='desc') sortKeys[idx].dir='asc';
+    else sortKeys.splice(idx,1);
   }
-  document.querySelectorAll('#sumtable th[data-col]').forEach(th => {
-    const ki = sortKeys.findIndex(k => k.col === th.dataset.col);
+  document.querySelectorAll('#sumtable th[data-col]').forEach(th=>{
+    const ki = sortKeys.findIndex(k=>k.col===th.dataset.col);
     const si = th.querySelector('.sort-ind');
-    if (ki === -1) { si.textContent = '↕'; th.style.color = ''; }
+    if (ki===-1) { si.textContent='↕'; th.style.color=''; }
     else {
-      const arrow = sortKeys[ki].dir === 'desc' ? '▼' : '▲';
-      si.innerHTML = arrow + (sortKeys.length > 1 ? `<sup style="font-size:8px">${ki+1}</sup>` : '');
-      th.style.color = 'var(--cyan)';
+      const arrow = sortKeys[ki].dir==='desc' ? '▼' : '▲';
+      si.innerHTML = arrow+(sortKeys.length>1?`<sup style="font-size:8px">${ki+1}</sup>`:'');
+      th.style.color='var(--cyan)';
     }
   });
-  const tbl   = document.getElementById('sumtable');
-  const rows  = Array.from(tbl.querySelectorAll('tr.sum-row'));
-  rows.sort((a, b) => {
-    for (const {col:c, dir:d} of sortKeys) {
-      const av = parseFloat(a.dataset[c]) || 0, bv = parseFloat(b.dataset[c]) || 0;
-      if (av !== bv) return d === 'desc' ? bv - av : av - bv;
+  const tbl  = document.getElementById('sumtable');
+  const rows = Array.from(tbl.querySelectorAll('tr.sum-row'));
+  rows.sort((a,b)=>{
+    for (const {col:c,dir:d} of sortKeys) {
+      const av=parseFloat(a.dataset[c])||0, bv=parseFloat(b.dataset[c])||0;
+      if (av!==bv) return d==='desc'?bv-av:av-bv;
     }
     return 0;
   });
-  const tbody = tbl.querySelector('tbody');
-  rows.forEach(r => tbody.appendChild(r));
+  tbl.querySelector('tbody')?.append(...rows);
 }
 
-// ── Lazy chart loading ──────────────────────────────────────────
-// Chart PNGs are loaded on first open from data-src
-function loadChartImage(card) {
+// ── Lazy chart load ────────────────────────────────────────────────
+function loadChart(card) {
   const img = card.querySelector('img.lazy-chart');
   if (!img) return;
   const src = img.dataset.src;
-  if (!src) {
-    img.parentElement.innerHTML =
-      '<div class="chart-placeholder">📊 Chart not available for this stock</div>';
-    return;
-  }
-  const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
-  if (!img.src || img.src === placeholder) {
-    img.src = src;
-  }
+  if (!src) { img.parentElement.innerHTML='<div class="chart-placeholder">📊 Chart not available</div>'; return; }
+  const ph = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+  if (!img.src || img.src===ph) img.src = src;
 }
 document.addEventListener('toggle', e => {
-  if (!e.target.classList?.contains('stock-card')) return;
-  if (!e.target.open) return;
-  loadChartImage(e.target);
-}, true);  // capture phase so toggle fires before paint
-
+  if (e.target.classList?.contains('stock-card') && e.target.open) loadChart(e.target);
+}, true);
 document.addEventListener('click', e => {
-  const summary = e.target.closest('details.stock-card>summary');
-  if (!summary) return;
-  loadChartImage(summary.parentElement);
+  const s = e.target.closest('details.stock-card>summary');
+  if (s) loadChart(s.parentElement);
+});
+
+// ── Init ───────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('details.stock-card').forEach(c=>c.style.display='');
+  document.querySelectorAll('.sum-row').forEach(r=>r.style.display='');
+  document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');
+  const total = document.querySelectorAll('details.stock-card').length;
+  const rc = document.getElementById('rc');
+  if (rc) rc.textContent = total;
 });
 """
 
@@ -1177,12 +1501,31 @@ def _build_detail_panels(d: dict) -> str:
                 f'<div class="detail-content">{content}</div>'
                 f'</details>')
 
+    # Market Cap Panel
+    cap_cat, cap_cls = categorize_marketcap(d['marketcap'])
+    if d['marketcap']:
+        cap_crore = d['marketcap'] / 1e7
+        cap_display = f"₹{cap_crore:,.0f} Cr" if cap_crore >= 1 else f"₹{d['marketcap']/1e6:,.1f}M"
+        cap_html = f"""<div class="trade-row"><span class="tl">Market Cap</span>
+          <span class="tv gold">{cap_display}</span></div>
+        <div class="trade-row"><span class="tl">Category</span>
+          <span class="tv"><span class="{cap_cls} badge">{cap_cat}</span></span></div>"""
+    else:
+        cap_html = '<div class="trade-row"><span class="tl">Market Cap</span><span class="tv" style="color:var(--sub)">Not available</span></div>'
+    # Add sector & indices to cap panel
+    if d.get('sector') and d['sector'] != 'Unknown':
+        cap_html += f'<div class="trade-row"><span class="tl">Sector</span><span class="tv"><span class="sector-tag badge">{d["sector"]}</span></span></div>'
+    if d.get('indices'):
+        idx_html = ' '.join(f'<span class="index-tag badge">{i}</span>' for i in d['indices'])
+        cap_html += f'<div class="trade-row"><span class="tl">Indices</span><span class="tv">{idx_html}</span></div>'
+
     return f"""<div class="card-details">
       {dp("📊 RSI · Daily · Weekly · Monthly", rsi_html, True)}
       {dp("🎯 CCI(20) · D · W · M",            cci_html)}
       {dp("📈 MACD(12,26) · D · W · M",         macd_html)}
       {dp("💼 Entry / Stop Loss / Exit",         trade_html, True)}
       {dp("🏆 Rankings",                         rank_html, True)}
+      {dp("💰 Market Cap",                       cap_html)}
       {dp(fib_lbl,                               fib_html)}
       {dp("⚡ Active Signals",                   sigs_html)}
       <details class="detail-panel" style="grid-column:1/-1">
@@ -1197,6 +1540,9 @@ def build_summary_table(results: list[dict]) -> str:
     for d in results:
         fr_tag  = ' <span class="fresh-tag">FRESH</span>'  if (d["fresh_d"] or d["fresh_w"]) else ""
         n50_tag = ' <span class="n50-tag">N50</span>'       if d["is_nifty50"]               else ""
+        sme_tag = ' <span class="sme-tag">SME</span>'       if d["is_sme"]                   else ""
+        cap_cat, cap_cls = categorize_marketcap(d["marketcap"])
+        cap_tag = f' <span class="{cap_cls}">{cap_cat}</span>' if cap_cat != "Unknown" else ""
         above_d = d["rsi_d"] > d["sma_d"]
         rsi_col = "var(--green)" if above_d else "var(--red)"
         m_col   = "var(--green)" if d["macd_l"] > 0 else "var(--red)"
@@ -1212,12 +1558,20 @@ def build_summary_table(results: list[dict]) -> str:
             data-phase="{d['phase']}"
             data-fresh="{'1' if (d['fresh_d'] or d['fresh_w']) else '0'}"
             data-nifty="{'1' if d['is_nifty50'] else '0'}"
+            data-sme="{'1' if d['is_sme'] else '0'}"
+            data-sector="{d['sector']}"
+            data-cap="{cap_cls}"
+            data-indices="{','.join(d.get('indices', []))}"
+            data-ticker="{d['ticker']}"
+            data-company="{d['company'][:40]}"
             data-score="{d['score']}"
             data-rsid="{d['rsi_d']}" data-rsiw="{d['rsi_w']}" data-rsim="{d['rsi_m']}"
             data-cci="{d['cci']}"    data-macd="{d['macd_l']}"
             data-close="{d['close']}" data-dist52="{d['dist52']}"
             data-rn50="{d['rank_nifty50']}" data-runiv="{d['rank_universe']}">
-          <td><b style="color:var(--cyan)">{d['ticker']}</b>{fr_tag}{n50_tag}
+          <td><b style="color:var(--cyan)">{d['ticker']}</b>{fr_tag}{n50_tag}{sme_tag}{cap_tag}
+              {'' if not d['indices'] else ' ' + ' '.join(f'<span class="index-tag">{idx}</span>' for idx in d['indices'])}
+              {'' if not d['sector'] else ' <span class="sector-tag">{d["sector"]}</span>'}
               <div style="font-size:10px;color:var(--sub)">{d['company'][:28]}</div></td>
           <td>{_phase_badge(d['phase'])}</td>
           <td>{_sig_span(d['signal'], d['sig_cls'])}</td>
@@ -1234,6 +1588,9 @@ def build_summary_table(results: list[dict]) -> str:
           <td style="text-align:right;color:{m_col}">{d['macd_l']:.3f}</td>
           <td style="text-align:right">₹{d['close']:,.2f}</td>
           <td style="text-align:right;color:{d52_col}">{d['dist52']}%</td>
+          <td style="text-align:center"><span class="{cap_cls} badge">{cap_cat}</span>
+              {f'<div style="font-size:10px;color:var(--sub)">₹{d["marketcap"]/1e7:,.0f} Cr</div>' if d["marketcap"] else ''}
+          </td>
           <td style="text-align:right"><span class="rank-pill {n50_cls}">{d['rank_nifty50_pos']}/{d['rank_nifty50_of']} ({n50_pct:.0f}%)</span></td>
           <td style="text-align:right"><span class="rank-pill {uv_cls}">{d['rank_univ_pos']}/{d['rank_univ_of']} ({univ_pct:.0f}%)</span></td>
         </tr>"""
@@ -1260,6 +1617,7 @@ def build_summary_table(results: list[dict]) -> str:
           {th('D-MACD',   'macd')}
           {th('Close',    'close')}
           {th('52W%',     'dist52')}
+          <th style="text-align:center">Market Cap</th>
           {th('vs N50',   'rn50')}
           {th('vs All',   'runiv')}
         </tr></thead>
@@ -1278,6 +1636,11 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
     if d["fresh_d"]: fr_tags += f' <span class="fresh-tag">🚀 Daily ({d["fresh_d_bars"]}d)</span>'
     if d["fresh_w"]: fr_tags += f' <span class="fresh-tag">📅 Weekly ({d["fresh_w_bars"]}w)</span>'
     n50_tag = ' <span class="n50-tag">NIFTY50</span>' if d["is_nifty50"] else ""
+    sme_tag = ' <span class="sme-tag">SME</span>' if d["is_sme"] else ""
+    idx_tags = ' ' + ' '.join(f'<span class="index-tag">{idx}</span>' for idx in d['indices']) if d['indices'] else ""
+    sector_tag = f' <span class="sector-tag">{d["sector"]}</span>' if d['sector'] and d['sector'] != 'Unknown' else ""
+    cap_cat, cap_cls = categorize_marketcap(d["marketcap"])
+    cap_tag = f' <span class="{cap_cls}">{cap_cat}</span>' if cap_cat != "Unknown" else ""
 
     n50_rank  = _rank_pill(d["rank_nifty50"], d["rank_nifty50_pos"], d["rank_nifty50_of"])
     univ_rank = _rank_pill(d["rank_universe"], d["rank_univ_pos"],   d["rank_univ_of"])
@@ -1296,7 +1659,13 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
     return f"""
 <details class="stock-card" data-phase="{d['phase']}"
          data-fresh="{'1' if (d['fresh_d'] or d['fresh_w']) else '0'}"
-         data-nifty="{'1' if d['is_nifty50'] else '0'}">
+         data-nifty="{'1' if d['is_nifty50'] else '0'}"
+         data-sme="{'1' if d['is_sme'] else '0'}"
+         data-cap="{cap_cls}"
+         data-sector="{d.get('sector','')}"
+         data-indices="{','.join(d.get('indices', []))}"
+         data-ticker="{d['ticker']}"
+         data-company="{d['company'][:50]}">
   <summary>
     <span class="card-arrow">▶</span>
     <span class="card-ticker">{d['ticker']}</span>
@@ -1304,7 +1673,7 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
     {_phase_badge(d['phase'])}
     <span class="{d['sig_cls']}" style="font-weight:700">{d['signal']}</span>
     <span class="card-score">Score {d['score']}/22</span>
-    {fr_tags}{n50_tag}
+    {fr_tags}{n50_tag}{sme_tag}{cap_tag}{idx_tags}{sector_tag}
     <span style="margin-left:auto;color:var(--sub);font-size:11px;text-align:right">
       D {d['rsi_d']} W {d['rsi_w']} M {d['rsi_m']} RSI
       &nbsp;|&nbsp; N50: {n50_rank}
@@ -1318,6 +1687,15 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
 </details>"""
 
 
+def _build_filter_options(all_results: list[dict]) -> tuple[str, str]:
+    """Build sector and index <option> lists for filter dropdowns."""
+    sectors = sorted({d["sector"] for d in all_results if d.get("sector") and d["sector"] != "Unknown"})
+    indices = sorted({idx for d in all_results for idx in (d.get("indices") or [])})
+    sec_opts = "".join(f'<option value="{s}">{s}</option>' for s in sectors)
+    idx_opts = "".join(f'<option value="{i}">{i}</option>' for i in indices)
+    return sec_opts, idx_opts
+
+
 def build_html_report(all_results: list[dict], chart_data: dict[str, str],
                       run_ts: str, scanned: int) -> str:
     n_up  = sum(1 for d in all_results if d["phase"] == "UPTREND")
@@ -1325,6 +1703,10 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
     n_be  = sum(1 for d in all_results if d["phase"] == "BEARISH")
     n_fr  = sum(1 for d in all_results if d["fresh_d"] or d["fresh_w"])
     n_n50 = sum(1 for d in all_results if d["is_nifty50"])
+    n_sme = sum(1 for d in all_results if d["is_sme"])
+    total = len(all_results)
+
+    sec_opts, idx_opts = _build_filter_options(all_results)
 
     stat_boxes = f"""<div class="stats-row">
       <div class="stat-box cyan"><div class="val">{scanned}</div><div class="lbl">Scanned</div></div>
@@ -1333,29 +1715,49 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
       <div class="stat-box red"><div class="val">{n_be}</div><div class="lbl">📉 Bearish</div></div>
       <div class="stat-box cyan"><div class="val">{n_fr}</div><div class="lbl">🚀 Fresh</div></div>
       <div class="stat-box gold"><div class="val">{n_n50}</div><div class="lbl">🏆 Nifty50</div></div>
+      <div class="stat-box green"><div class="val">{n_sme}</div><div class="lbl">📊 SME</div></div>
     </div>"""
 
-    filter_bar = f"""<div class="filter-bar">
-      <button class="filter-btn active" onclick="filterPhase('all',this)">All ({len(all_results)})</button>
-      <button class="filter-btn" onclick="filterPhase('fresh',this)">🚀 Fresh ({n_fr})</button>
-      <button class="filter-btn" onclick="filterPhase('UPTREND',this)">📈 Uptrend ({n_up})</button>
-      <button class="filter-btn" onclick="filterPhase('SIDEWAYS',this)">➡️ Sideways ({n_sw})</button>
-      <button class="filter-btn" onclick="filterPhase('BEARISH',this)">📉 Bearish ({n_be})</button>
-      <button class="filter-btn" onclick="filterPhase('nifty50',this)">🏆 Nifty50 ({n_n50})</button>
+    filter_bar = f"""<div class="filter-section">
+      <div class="filter-row1">
+        <input id="searchInp" class="filter-input" type="text"
+               placeholder="🔍 Search ticker / company…" oninput="onSearch(this.value)">
+        <select id="capSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">💰 All Cap Sizes</option>
+          <option value="cap-large">🟢 Large Cap (&gt;₹2L Cr)</option>
+          <option value="cap-mid">🔵 Mid Cap (₹50K–2L Cr)</option>
+          <option value="cap-small">🟡 Small Cap (₹5K–50K Cr)</option>
+          <option value="cap-micro">🟠 Micro Cap (&lt;₹5K Cr)</option>
+        </select>
+        <select id="secSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">🏭 All Sectors / Industries</option>
+          {sec_opts}
+        </select>
+        <select id="idxSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">📊 All Indices</option>
+          {idx_opts}
+        </select>
+        <button class="clear-btn" onclick="clearAll()">✖ Clear</button>
+        <span class="results-info">Showing <b id="rc">{total}</b> of {total} stocks</span>
+      </div>
+      <div class="filter-row2">
+        <button class="phase-btn" data-phase="all"      onclick="filterPhase('all',this)">All ({total})</button>
+        <button class="phase-btn" data-phase="fresh"    onclick="filterPhase('fresh',this)">🚀 Fresh ({n_fr})</button>
+        <button class="phase-btn" data-phase="UPTREND"  onclick="filterPhase('UPTREND',this)">📈 Uptrend ({n_up})</button>
+        <button class="phase-btn" data-phase="SIDEWAYS" onclick="filterPhase('SIDEWAYS',this)">➡️ Sideways ({n_sw})</button>
+        <button class="phase-btn" data-phase="BEARISH"  onclick="filterPhase('BEARISH',this)">📉 Bearish ({n_be})</button>
+        <button class="phase-btn" data-phase="nifty50"  onclick="filterPhase('nifty50',this)">🏆 Nifty50 ({n_n50})</button>
+        <button class="phase-btn" data-phase="sme"      onclick="filterPhase('sme',this)">📊 SME ({n_sme})</button>
+        <div id="chips" class="active-chips"></div>
+      </div>
     </div>"""
 
     sum_table = build_summary_table(all_results)
 
-    # Build cards (all collapsed by default — browser renders instantly)
     if not all_results:
-        cards_html = '<div class="no-results" style="padding:20px 28px;color:var(--sub);">No stocks were successfully analysed. Check the error log for details.</div>'
+        cards_html = '<div style="padding:20px;color:var(--sub);">No stocks analysed. Check error log.</div>'
     else:
-        cards_html = ""
-        for d in all_results:
-            has_chart = d["ticker"] in chart_data
-            cards_html += build_stock_card(d, has_chart)
-
-    charts_script = ""
+        cards_html = "".join(build_stock_card(d, d["ticker"] in chart_data) for d in all_results)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1363,38 +1765,47 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>RSI MTF Breakout Report — {run_ts}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+        crossorigin="anonymous">
   <style>{_CSS}</style>
 </head>
 <body>
-  <div class="header">
-    <h1>📈 RSI Multi-Timeframe Breakout Report v2.0</h1>
+  <div class="app-header">
+    <h1>📈 RSI Multi-Timeframe Breakout Report <small style="font-size:13px;color:var(--sub);font-weight:400">v3.0</small></h1>
     <div class="subtitle">
       NSE EQ Universe &nbsp;|&nbsp; {run_ts} IST &nbsp;|&nbsp;
       RSI(14) D/W/M + MACD(12,26) + CCI(20) &nbsp;|&nbsp;
       Ranked vs Nifty50 &amp; All NSE &nbsp;|&nbsp;
-      Charts: {len(chart_data)} PNGs generated (lazy-loaded on expand)
+      {len(chart_data)} charts generated (lazy-loaded)
     </div>
     {stat_boxes}
   </div>
 
   {filter_bar}
-  {sum_table}
+
+  <div class="table-section">
+    {sum_table}
+  </div>
 
   <div class="cards-section">
-    <h2>🔍 DETAILED ANALYSIS — all {len(all_results)} stocks
-      (click ▶ to expand any card · details panels expand independently)</h2>
+    <h2>🔍 DETAILED ANALYSIS — {total} stocks &nbsp;
+      <span style="font-weight:400;font-size:11px">(click ▶ to expand · panels expand independently)</span>
+    </h2>
     {cards_html}
   </div>
 
   <div class="footer">
-    RSI MTF Report v2.0 &nbsp;|&nbsp; {run_ts} &nbsp;|&nbsp;
+    RSI MTF Report v3.0 &nbsp;|&nbsp; {run_ts} &nbsp;|&nbsp;
     <b>Not financial advice.</b><br>
-    Entry: RSI D+W+M > SMA + CCI>0 + MACD>Signal &nbsp;|&nbsp;
+    Entry: RSI D+W+M &gt; SMA + CCI&gt;0 + MACD&gt;Signal &nbsp;|&nbsp;
     SL: 2×ATR or swing low &nbsp;|&nbsp;
     Exit: RSI crosses below SMA or CCI &lt; −100
   </div>
 
-  {charts_script}
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-YvpcrYf0tY3lHB60NNkmXc4s9bIOgUxi8T/jzmFG8RMbAIg1M5DW9Vk3f67vZkY"
+          crossorigin="anonymous"></script>
   <script>{_JS}</script>
 </body>
 </html>"""
@@ -1457,7 +1868,10 @@ def main():
     results.sort(key=lambda d: (d["rank_universe"], d["score"]), reverse=True)
 
     n50_in_scan = sum(1 for d in results if d["is_nifty50"])
-    print(f"   Nifty50 stocks in scan: {n50_in_scan}/{len(NIFTY50)}\n")
+    sme_in_scan = sum(1 for d in results if d["is_sme"])
+    print(f"   Nifty50 stocks in scan: {n50_in_scan}/{len(NIFTY50)}")
+    print(f"   SME stocks in scan    : {sme_in_scan}  "
+          f"(of {len(_SME_STOCKS)} in SME universe)\n")
 
     # ── Step 3: HTML ──────────────────────────────────────────────
     print("▶  STEP 3/3  Generate charts + build HTML")
