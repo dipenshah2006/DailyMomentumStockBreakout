@@ -31,13 +31,13 @@ MIN_CANDLES         = 1          # include all stocks regardless of history leng
 MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise top N stocks
 CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
 CHART_BARS          = 120       # bars per chart (fewer = smaller PNG)
-CHART_DPI           = 150       # HD charts — crisp on retina / zoomed view
+CHART_DPI           = 200       # Ultra HD charts — crisp, professional quality
 
 FRESH_DAYS_D        = 3
 FRESH_WEEKS_W       = 2
 
 RSI_P               = 14
-RSI_SMA_P           = 14
+RSI_SMA_P           = 34
 CCI_P               = 20
 MACD_F, MACD_S, MACD_SIG_P = 12, 26, 9
 ATR_P               = 14
@@ -1315,21 +1315,23 @@ def generate_chart(data: dict) -> str:
         GOLD="#ffd700"; CYAN="#00d4ff"; PURPLE="#b39ddb"; ORANGE="#ff9800"
         GREY="#30363d"; TXT="#c9d1d9"; FIB_EXT="#4caf50"; FIB_RET="#ff7043"
 
-        fig = plt.figure(figsize=(18, 11), facecolor=BG)  # wider canvas for HD
+        fig = plt.figure(figsize=(20, 12), facecolor=BG)  # larger canvas for better clarity
         fig.suptitle(
             f"{ticker} — {data['company']}  |  ₹{data['close']:,.2f}  "
             f"|  {data['phase']}  |  {data['signal']}  |  Score {data['score']}/21  "
             f"|  Univ rank #{data['rank_univ_pos']}/{data['rank_univ_of']}",
-            color=TXT, fontsize=11, fontweight="bold", y=0.998
+            color=TXT, fontsize=14, fontweight="bold", y=0.998
         )
         gs   = gridspec.GridSpec(5, 1, figure=fig, hspace=0.04,
                                  height_ratios=[4, 1.2, 1.8, 1.4, 1.4])
         axes = [fig.add_subplot(gs[i]) for i in range(5)]
         for ax in axes:
             ax.set_facecolor(PANEL)
-            ax.tick_params(colors=TXT, labelsize=7)
+            ax.tick_params(colors=TXT, labelsize=9, width=1.2, length=5)
             ax.spines[:].set_color(GREY)
-            ax.grid(True, color=GREY, linewidth=0.3, linestyle="--")
+            for spine in ax.spines.values():
+                spine.set_linewidth(1.2)
+            ax.grid(True, color=GREY, linewidth=0.5, linestyle="--", alpha=0.6)
             ax.set_xlim(-1, len(idx))
 
         step = max(1, len(idx) // 10)
@@ -1338,89 +1340,90 @@ def generate_chart(data: dict) -> str:
         for ax in axes:
             ax.set_xticks(tpos)
             ax.set_xticklabels([] if ax != axes[-1] else tlbl,
-                               rotation=30, ha="right", fontsize=6.5)
+                               rotation=30, ha="right", fontsize=8, fontweight="bold")
 
         # Panel 1: Candlestick
         ax1 = axes[0]
         for i, (_, row) in enumerate(df.iterrows()):
             up  = float(row["Close"]) >= float(row["Open"])
             col = GREEN if up else RED
-            ax1.plot([i, i], [float(row["Low"]), float(row["High"])], color=col, lw=0.7, zorder=2)
+            ax1.plot([i, i], [float(row["Low"]), float(row["High"])], color=col, lw=1.2, zorder=2)
             ax1.bar(i, abs(float(row["Close"]) - float(row["Open"])),
                     bottom=min(float(row["Open"]), float(row["Close"])),
-                    color=col, width=0.7, linewidth=0, zorder=3)
-        ax1.axhline(data["close"], color=GOLD, lw=0.8, linestyle="--", alpha=0.6)
+                    color=col, width=0.75, linewidth=1.2, edgecolor=col, zorder=3)
+        ax1.axhline(data["close"], color=GOLD, lw=1.5, linestyle="--", alpha=0.8, label="Current")
         fib_col = FIB_EXT if data["fib_type"] == "EXTENSION" else FIB_RET
         for lbl, level in data["fib_levels"].items():
-            ax1.axhline(level, color=fib_col, lw=0.8, linestyle=":", alpha=0.75)
+            ax1.axhline(level, color=fib_col, lw=1.2, linestyle=":", alpha=0.85)
             ax1.text(len(idx)-1, level, f" {lbl} ₹{level:,.0f}",
-                     color=fib_col, fontsize=5.5, va="center")
-        ax1.axhline(data["atr_sl"],   color=RED, lw=0.6, linestyle="-.", alpha=0.5)
-        ax1.axhline(data["swing_sl"], color=RED, lw=0.5, linestyle="-.", alpha=0.3)
+                     color=fib_col, fontsize=7, va="center", fontweight="bold", bbox=dict(boxstyle="round,pad=0.3", facecolor=PANEL, edgecolor=fib_col, linewidth=0.5))
+        ax1.axhline(data["atr_sl"],   color=RED, lw=1.2, linestyle="-.", alpha=0.7, label="ATR SL")
+        ax1.axhline(data["swing_sl"], color=RED, lw=1.0, linestyle="-.", alpha=0.5, label="Swing SL")
         sig_dates = {s["date"]: s["type"] for s in data["hist_sigs"][-8:]}
         for i, dt in enumerate(df.index):
             lbl = sig_dates.get(dt.strftime("%d-%b-%y"))
             if lbl == "BUY":
-                ax1.plot(i, float(df["Low"].iloc[i]) * 0.993, "^", color=GREEN, markersize=6, zorder=5)
+                ax1.plot(i, float(df["Low"].iloc[i]) * 0.993, "^", color=GREEN, markersize=10, zorder=5, markeredgecolor="white", markeredgewidth=1.5)
             elif lbl == "SELL":
-                ax1.plot(i, float(df["High"].iloc[i]) * 1.007, "v", color=RED, markersize=6, zorder=5)
-        ax1.set_ylabel("Price ₹", color=TXT, fontsize=7)
+                ax1.plot(i, float(df["High"].iloc[i]) * 1.007, "v", color=RED, markersize=10, zorder=5, markeredgecolor="white", markeredgewidth=1.5)
+        ax1.set_ylabel("Price ₹", color=TXT, fontsize=10, fontweight="bold")
         ax1.legend(handles=[mpatches.Patch(color=fib_col, label=f"Fib {data['fib_type']}")],
-                   loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=6)
+                   loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
 
         # Panel 2: Volume
         ax2 = axes[1]
         vol_avg = pd.Series(df["Volume"].values).rolling(20).mean().values
         for i, (_, row) in enumerate(df.iterrows()):
             col = GREEN if float(row["Close"]) >= float(row["Open"]) else RED
-            ax2.bar(i, float(row["Volume"]), color=col, width=0.7, alpha=0.7, linewidth=0)
-        ax2.plot(idx, vol_avg, color=GOLD, lw=0.8)
+            ax2.bar(i, float(row["Volume"]), color=col, width=0.75, alpha=0.75, linewidth=0.8, edgecolor=col)
+        ax2.plot(idx, vol_avg, color=GOLD, lw=2.0, label="Vol MA(20)", zorder=5)
         ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.1f}M"))
-        ax2.set_ylabel("Vol", color=TXT, fontsize=7)
+        ax2.set_ylabel("Volume", color=TXT, fontsize=10, fontweight="bold")
+        ax2.legend(loc="upper right", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
 
         # Panel 3: RSI D/W/M
         ax3 = axes[2]
-        ax3.fill_between(idx, 30, 70, alpha=0.06, color=CYAN)
-        ax3.axhline(70, color=RED,   lw=0.6, linestyle="--", alpha=0.5)
-        ax3.axhline(55, color=GREEN, lw=0.5, linestyle=":",  alpha=0.4)
-        ax3.axhline(50, color=TXT,   lw=0.5, linestyle="--", alpha=0.3)
-        ax3.axhline(30, color=GREEN, lw=0.6, linestyle="--", alpha=0.5)
-        ax3.plot(idx, rsi_d, color=CYAN,   lw=1.2, label=f"RSI-D {data['rsi_d']}")
-        ax3.plot(idx, sma_d, color=ORANGE, lw=0.9, linestyle="--", label=f"SMA {data['sma_d']}")
-        ax3.plot(idx, rsi_w, color=PURPLE, lw=0.8, linestyle="-.", label=f"RSI-W {data['rsi_w']}")
-        ax3.plot(idx, rsi_m, color=GOLD,   lw=0.8, linestyle=":",  label=f"RSI-M {data['rsi_m']}")
+        ax3.fill_between(idx, 30, 70, alpha=0.15, color=CYAN, label="Overbought/Oversold")
+        ax3.axhline(70, color=RED,   lw=1.5, linestyle="--", alpha=0.7)
+        ax3.axhline(55, color=GREEN, lw=1.2, linestyle=":",  alpha=0.6)
+        ax3.axhline(50, color=TXT,   lw=1.0, linestyle="--", alpha=0.4)
+        ax3.axhline(30, color=GREEN, lw=1.5, linestyle="--", alpha=0.7)
+        ax3.plot(idx, rsi_d, color=CYAN,   lw=2.0, label=f"RSI({RSI_P})-D {data['rsi_d']}", zorder=4)
+        ax3.plot(idx, sma_d, color=ORANGE, lw=1.8, linestyle="--", label=f"SMA({RSI_SMA_P}) {data['sma_d']}", zorder=4)
+        ax3.plot(idx, rsi_w, color=PURPLE, lw=1.5, linestyle="-.", label=f"RSI({RSI_P})-W {data['rsi_w']}", alpha=0.8, zorder=3)
+        ax3.plot(idx, rsi_m, color=GOLD,   lw=1.5, linestyle=":",  label=f"RSI({RSI_P})-M {data['rsi_m']}", alpha=0.8, zorder=3)
         if data["fresh_d"] and data["fresh_d_bars"] <= n_bars:
             cx = len(idx) - data["fresh_d_bars"]
-            ax3.axvline(cx, color=GREEN, lw=0.8, linestyle="--", alpha=0.6)
-            ax3.text(cx, 74, "FRESH", color=GREEN, fontsize=5, ha="center")
-        ax3.set_ylim(10, 90); ax3.set_ylabel("RSI", color=TXT, fontsize=7)
-        ax3.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=6, ncol=4)
+            ax3.axvline(cx, color=GREEN, lw=2.0, linestyle="--", alpha=0.8, label="Fresh Cross")
+            ax3.text(cx, 74, "FRESH", color=GREEN, fontsize=9, ha="center", fontweight="bold", bbox=dict(boxstyle="round,pad=0.4", facecolor=PANEL, edgecolor=GREEN, linewidth=1.5))
+        ax3.set_ylim(10, 90); ax3.set_ylabel("RSI", color=TXT, fontsize=10, fontweight="bold")
+        ax3.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, ncol=2, framealpha=0.95)
 
         # Panel 4: MACD
         ax4 = axes[3]
-        ax4.axhline(0, color=GREY, lw=0.6)
+        ax4.axhline(0, color=GREY, lw=1.5, alpha=0.7)
         ax4.bar(idx, macd_h, color=[GREEN if v >= 0 else RED for v in macd_h],
-                width=0.7, alpha=0.6, linewidth=0)
-        ax4.plot(idx, macd_l, color=CYAN,   lw=1.0, label=f"MACD {data['macd_l']:.3f}")
-        ax4.plot(idx, macd_s, color=ORANGE, lw=0.8, linestyle="--",
-                 label=f"Sig {data['macd_s']:.3f}")
-        ax4.set_ylabel("MACD(12,26)", color=TXT, fontsize=7)
-        ax4.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=6, ncol=2)
+                width=0.75, alpha=0.75, linewidth=0.8, edgecolor=[GREEN if v >= 0 else RED for v in macd_h])
+        ax4.plot(idx, macd_l, color=CYAN,   lw=2.0, label=f"MACD {data['macd_l']:.3f}", zorder=4)
+        ax4.plot(idx, macd_s, color=ORANGE, lw=1.8, linestyle="--",
+                 label=f"Signal {data['macd_s']:.3f}", zorder=4)
+        ax4.set_ylabel("MACD(12,26)", color=TXT, fontsize=10, fontweight="bold")
+        ax4.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
 
         # Panel 5: CCI
         ax5 = axes[4]
-        ax5.axhline(100,  color=RED,   lw=0.6, linestyle="--", alpha=0.7)
-        ax5.axhline(0,    color=GREY,  lw=0.5)
-        ax5.axhline(-100, color=GREEN, lw=0.6, linestyle="--", alpha=0.7)
+        ax5.axhline(100,  color=RED,   lw=1.5, linestyle="--", alpha=0.7)
+        ax5.axhline(0,    color=GREY,  lw=1.2, alpha=0.6)
+        ax5.axhline(-100, color=GREEN, lw=1.5, linestyle="--", alpha=0.7)
         ax5.bar(idx, cci, color=[GREEN if v >= 0 else RED for v in cci],
-                width=0.7, alpha=0.55, linewidth=0)
-        ax5.plot(idx, cci, color=CYAN, lw=0.8, label=f"CCI(20) {data['cci']:.1f}")
-        ax5.set_ylabel("CCI(20)", color=TXT, fontsize=7)
-        ax5.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=6)
+                width=0.75, alpha=0.75, linewidth=0.8, edgecolor=[GREEN if v >= 0 else RED for v in cci])
+        ax5.plot(idx, cci, color=CYAN, lw=2.0, label=f"CCI(20) {data['cci']:.1f}", zorder=4)
+        ax5.set_ylabel("CCI(20)", color=TXT, fontsize=10, fontweight="bold")
+        ax5.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
 
         plt.tight_layout(rect=[0, 0, 1, 0.996])
         updated_at = datetime.now().strftime("%d %b %Y %H:%M")
-        fig.text(0.995, 0.005, f"Updated: {updated_at}", ha="right", va="bottom", color=TXT, fontsize=7)
+        fig.text(0.995, 0.005, f"Updated: {updated_at}", ha="right", va="bottom", color=TXT, fontsize=9, style="italic")
         os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
         chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
         fig.savefig(chart_path, format="png", dpi=CHART_DPI, bbox_inches="tight", facecolor=BG)
