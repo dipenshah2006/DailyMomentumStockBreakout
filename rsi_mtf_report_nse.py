@@ -1169,6 +1169,37 @@ def analyze_stock(ticker: str) -> dict | None:
         v_l52   = float(df["Close"].rolling(252).min().iloc[-1])
         v_d52   = round((v_close / v_h52 - 1) * 100, 1)
 
+        # ── All-Time High (ATH) — uses High column for true price extreme ────
+        ath_price    = float(df["High"].max())
+        ath_idx      = df["High"].idxmax()
+        ath_date_str = ath_idx.strftime("%d %b %Y")
+        last_date    = df.index[-1].date()
+        first_date   = df.index[0].date()
+        ath_date_dt  = ath_idx.date()
+        # Within 1% of ATH high → treat as "at ATH"
+        is_ath  = v_close >= ath_price * 0.99
+        ath_pct = round((v_close / ath_price - 1) * 100, 1)   # <= 0
+
+        def _time_str(days: int) -> str:
+            """Convert a day-count into a compact 'Xy Xm' string."""
+            days = max(0, days)
+            years, rem = divmod(days, 365)
+            months = rem // 30
+            if years and months:
+                return f"{years}y {months}m"
+            if years:
+                return f"{years}y"
+            if months:
+                return f"{months}m"
+            return f"{days}d"
+
+        if is_ath:
+            days_to_ath  = (ath_date_dt - first_date).days
+            ath_time_str = _time_str(days_to_ath) + " to reach"
+        else:
+            days_since   = (last_date - ath_date_dt).days
+            ath_time_str = _time_str(days_since) + " ago"
+
         # Donchian breakout metrics (20-period prior high breakout on D/W/M)
         def prev_period_max(series, window):
             val = series.shift(1).rolling(window).max().iloc[-1]
@@ -1269,6 +1300,8 @@ def analyze_stock(ticker: str) -> dict | None:
         "sw_low": sw_low, "sw_high": sw_high,
         "fib_type": fib_type, "fib_levels": fib_levels, "fib_base": fib_base,
         "hist_sigs": hist_sigs,
+        "ath_price": round(ath_price, 2), "ath_date": ath_date_str,
+        "ath_pct": ath_pct, "is_ath": is_ath, "ath_time_str": ath_time_str,
         # raw series — used for chart only, stripped before HTML table
         "_df": df, "_rsi_d": rsi_d, "_sma_d": sma_d,
         "_rsi_w_daily": rsi_w.reindex(df.index, method="ffill"),
@@ -1690,6 +1723,43 @@ details.detail-panel[open]>summary::after{transform:rotate(180deg);display:inlin
                border-radius:10px;padding:10px 0;font-size:13px;font-weight:600;
                cursor:pointer;transition:all .2s;letter-spacing:.4px}
 .load-more-btn:hover{background:#002d40;border-color:var(--cyan)}
+/* ── All-Time High tags ─────────────────────────────────── */
+.ath-tag{display:inline-flex;align-items:center;gap:3px;background:linear-gradient(135deg,#1a3a1a,#0d2d0d);
+         color:#00e676;border:1px solid #00e67688;border-radius:8px;
+         padding:2px 8px;font-size:10px;font-weight:700;letter-spacing:.3px;white-space:nowrap}
+.ath-tag .ath-sub{font-weight:400;color:#69f0ae;font-size:9px;margin-left:2px}
+.ath-away-tag{display:inline-flex;align-items:center;gap:3px;
+              background:#1a1a0d;color:#ffd700;border:1px solid #ffd70055;
+              border-radius:8px;padding:2px 8px;font-size:10px;font-weight:700;
+              letter-spacing:.3px;white-space:nowrap}
+.ath-away-tag .ath-sub{font-weight:400;color:#bdb76b;font-size:9px;margin-left:2px}
+/* ── Column Tooltips ─────────────────────────────────── */
+.th-wrap{position:relative;display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+.th-wrap .tip-icon{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:13px;height:13px;border-radius:50%;
+  background:#21262d;border:1px solid #444;
+  color:#888;font-size:9px;font-weight:700;font-style:normal;
+  flex-shrink:0;cursor:help;line-height:1}
+.th-wrap:hover .tip-icon{background:#002d40;border-color:var(--cyan);color:var(--cyan)}
+.col-tooltip{
+  display:none;position:absolute;top:calc(100% + 6px);left:50%;
+  transform:translateX(-50%);z-index:9999;
+  width:240px;background:#1c2128;border:1px solid #30363d;
+  border-radius:8px;padding:9px 12px;
+  font-size:11px;line-height:1.55;color:#c9d1d9;
+  box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none;
+  white-space:normal;text-align:left;font-weight:400}
+.col-tooltip b{color:var(--cyan)}
+.col-tooltip .tip-action{margin-top:6px;padding-top:6px;border-top:1px solid #30363d;font-size:10.5px}
+.col-tooltip .tip-buy{color:var(--green)}.col-tooltip .tip-sell{color:var(--red)}
+.col-tooltip .tip-watch{color:var(--gold)}
+.th-wrap:hover .col-tooltip{display:block}
+/* keep tooltip visible when pointer moves into it */
+.th-wrap .col-tooltip:hover{display:block}
+/* flip tooltip for last few columns so it doesn't go off-screen */
+.th-wrap.tip-left .col-tooltip{left:auto;right:0;transform:none}
+
 /* mobile */
 @media(max-width:600px){
   .app-header{padding:14px 14px 12px}
@@ -1699,6 +1769,7 @@ details.detail-panel[open]>summary::after{transform:rotate(180deg);display:inlin
   .card-ticker{font-size:14px}
   .stat-box{min-width:75px;padding:8px 10px}
   .stat-box .val{font-size:18px}
+  .col-tooltip{width:190px;font-size:10px}
 }
 """
 
@@ -1713,7 +1784,7 @@ _JS = """
 
 // STOCKS, CHART_DIR, PAGE_TBL, PAGE_CARDS are injected by Python above this block
 
-const F = { phase:'all', cap:'all', sector:'all', index:'all', search:'' };
+const F = { phase:'all', cap:'all', sector:'all', index:'all', signal:'all', ath:'all', search:'' };
 let sortKeys   = [];
 let filtered   = [];
 let tblPage    = 0;
@@ -1746,6 +1817,17 @@ function rankPill(pct,pos,of){
   return `<span class="rank-pill ${cls}">${indicator} #${pos}/${of} (${Math.round(pct)}%ile)</span>`;
 }
 
+// ── ATH tag helper ───────────────────────────────────────────────
+function athTag(s){
+  if(s.is_ath)
+    return `<span class="ath-tag">🏆 ATH<span class="ath-sub">${esc(s.ath_time_str)}</span></span>`;
+  if(s.ath_pct!=null&&s.ath_pct<0){
+    const cls=s.ath_pct>=-5?'var(--gold)':s.ath_pct>=-15?'var(--gold)':'var(--red)';
+    return `<span class="ath-away-tag">${s.ath_pct}% ATH<span class="ath-sub">${esc(s.ath_time_str)}</span></span>`;
+  }
+  return '';
+}
+
 // ── Match stock against current filters ───────────────────────────
 function matchStock(s){
   if(F.phase!=='all'){
@@ -1757,6 +1839,15 @@ function matchStock(s){
   if(F.cap   !=='all'&&s.cap_cls !==F.cap)    return false;
   if(F.sector!=='all'&&s.sector  !==F.sector) return false;
   if(F.index !=='all'&&!(s.indices||[]).includes(F.index)) return false;
+  if(F.signal!=='all'&&s.sig_cls !==F.signal) return false;
+  if(F.ath!=='all'){
+    const p=s.ath_pct;
+    if(F.ath==='at'  &&!s.is_ath)                        return false;
+    if(F.ath==='w5'  &&(s.is_ath||p==null||p<-5))        return false;
+    if(F.ath==='w10' &&(s.is_ath||p==null||p<-10))       return false;
+    if(F.ath==='w20' &&(s.is_ath||p==null||p<-20))       return false;
+    if(F.ath==='far' &&(p==null||p>=-20))                 return false;
+  }
   if(F.search){
     const q=F.search.toLowerCase();
     if(!s.ticker.toLowerCase().includes(q)&&!s.company.toLowerCase().includes(q)) return false;
@@ -1827,9 +1918,12 @@ function rowHTML(s){
   const mcap=s.marketcap!=null
     ?`<div style="font-size:10px;color:var(--sub)">₹${(s.marketcap/1e7).toLocaleString('en-IN',{maximumFractionDigits:0})} Cr</div>`
     :'<div style="font-size:10px;color:var(--sub)">—</div>';
+  const _athTag = athTag(s);
   return `<tr class="sum-row">
   <td><b style="color:var(--cyan)">${esc(s.ticker)}</b> ${frTag}${n50Tag}${smeTag}
-      <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div></td>
+      <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div>
+      <div style="font-size:10px;color:var(--gold);font-weight:600">${fmtINR(s.close)}</div>
+      ${_athTag?`<div style="margin-top:3px">${_athTag}</div>`:''}</td>
   <td style="text-align:center">${phaseBadge(s.phase)}</td>
   <td style="text-align:center"><span class="${s.sig_cls}">${esc(s.signal)}</span></td>
   <td style="text-align:center"><b>${s.score}</b>/21</td>
@@ -1923,6 +2017,7 @@ function cardSummaryHTML(s,idx){
   const capTag=s.cap_cat!=='Unknown'?`<span class="${s.cap_cls}">${s.cap_cat}</span>`:'';
   const idxTags=(s.indices||[]).map(i=>`<span class="index-tag">${esc(i)}</span>`).join(' ');
   const secTag=(s.sector&&s.sector!=='Unknown')?`<span class="sector-tag">${esc(s.sector)}</span>`:'';
+  const _ath=athTag(s);
   return `<details class="stock-card" data-idx="${idx}">
   <summary>
     <span class="card-arrow">▶</span>
@@ -1931,7 +2026,7 @@ function cardSummaryHTML(s,idx){
     ${phaseBadge(s.phase)}
     <span class="${s.sig_cls}" style="font-weight:700">${esc(s.signal)}</span>
     <span class="card-score">Score ${s.score}/21</span>
-    ${frTags}${n50Tag}${smeTag}${capTag}${idxTags}${secTag}
+    ${frTags}${n50Tag}${smeTag}${capTag}${idxTags}${secTag}${_ath?_ath:''}
     <span style="margin-left:auto;color:var(--sub);font-size:11px;text-align:right">
       D ${s.rsi_d} W ${s.rsi_w} M ${s.rsi_m} RSI
       &nbsp;|&nbsp; N50: ${rankPill(s.rank_nifty50,s.rank_nifty50_pos,s.rank_nifty50_of)}
@@ -2043,8 +2138,17 @@ function buildCardBody(s){
 
   // Trade panel
   const sellHtml=(s.sell_conds||[]).map(c=>`<div class="sell-cond">⚠ ${esc(c)}</div>`).join('');
+  const athRowHtml=s.is_ath
+    ?`<div class="trade-row"><span class="tl">All-Time High</span>
+        <span class="tv" style="color:#00e676">🏆 ${fmtINR(s.ath_price)} <span style="font-size:10px;color:#69f0ae">${esc(s.ath_time_str)}</span></span></div>`
+    :`<div class="trade-row"><span class="tl">All-Time High</span>
+        <span class="tv">${fmtINR(s.ath_price)}
+          <span style="color:var(--red);font-size:11px">&nbsp;${s.ath_pct}%</span>
+          <span style="color:var(--sub);font-size:10px">&nbsp;(${esc(s.ath_time_str)})</span>
+        </span></div>`;
   const tradeHtml=`
     <div class="trade-row"><span class="tl">Close</span><span class="tv gold">${fmtINR(s.close)}</span></div>
+    ${athRowHtml}
     <div class="trade-row"><span class="tl">ATR(14) SL</span>
       <span class="tv red">${fmtINR(s.atr_sl)} (${s.r_sl_pct>0?'+':''}${s.r_sl_pct}%)</span></div>
     <div class="trade-row"><span class="tl">Swing Low SL</span>
@@ -2166,6 +2270,8 @@ function onDropChange(){
   F.cap   =document.getElementById('capSel').value;
   F.sector=document.getElementById('secSel').value;
   F.index =document.getElementById('idxSel').value;
+  F.signal=document.getElementById('sigSel').value;
+  F.ath   =document.getElementById('athSel').value;
   applyFilters();
 }
 let _st=null;
@@ -2174,8 +2280,8 @@ function onSearch(v){
   _st=setTimeout(()=>{ F.search=v.trim(); applyFilters(); },220);
 }
 function clearAll(){
-  Object.assign(F,{phase:'all',cap:'all',sector:'all',index:'all',search:''});
-  ['capSel','secSel','idxSel'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='all';});
+  Object.assign(F,{phase:'all',cap:'all',sector:'all',index:'all',signal:'all',ath:'all',search:''});
+  ['capSel','secSel','idxSel','sigSel','athSel'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='all';});
   const si=document.getElementById('searchInp');if(si)si.value='';
   document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active'));
   document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');
@@ -2184,6 +2290,8 @@ function clearAll(){
 
 // ─── Filter chips ─────────────────────────────────────────────────
 const CAP_LABELS={'cap-large':'Large Cap','cap-mid':'Mid Cap','cap-small':'Small Cap','cap-micro':'Micro Cap'};
+const ATH_LABELS={at:'🏆 At ATH',w5:'✅ Within 5% ATH',w10:'🟡 Within 10% ATH',w20:'🟠 Within 20% ATH',far:'📉 >20% below ATH'};
+const SIG_LABELS={'sig-strong-buy':'🚀 Strong Buy','sig-buy':'✅ Buy','sig-watch':'👀 Watch','sig-avoid':'❌ Avoid','sig-neutral':'⚪ Neutral'};
 function renderChips(){
   const c=document.getElementById('chips');
   if(!c) return;
@@ -2192,6 +2300,8 @@ function renderChips(){
   if(F.cap!=='all')    chips.push([CAP_LABELS[F.cap]||F.cap,()=>{F.cap='all';document.getElementById('capSel').value='all';}]);
   if(F.sector!=='all') chips.push([F.sector,()=>{F.sector='all';document.getElementById('secSel').value='all';}]);
   if(F.index!=='all')  chips.push([F.index,()=>{F.index='all';document.getElementById('idxSel').value='all';}]);
+  if(F.signal!=='all') chips.push([SIG_LABELS[F.signal]||F.signal,()=>{F.signal='all';document.getElementById('sigSel').value='all';}]);
+  if(F.ath!=='all')    chips.push([ATH_LABELS[F.ath]||F.ath,()=>{F.ath='all';document.getElementById('athSel').value='all';}]);
   if(F.search)         chips.push([`"${F.search}"`,()=>{F.search='';document.getElementById('searchInp').value='';}]);
   c.innerHTML=chips.map((ch,i)=>
     `<span class="chip">${esc(ch[0])} <span class="x" onclick="(${chips[i][1].toString()})();applyFilters()">✕</span></span>`
@@ -2380,34 +2490,236 @@ def _build_detail_panels(d: dict) -> str:
 
 def build_summary_table() -> str:
     """Return the table skeleton only — tbody is populated by JS from STOCKS JSON."""
-    def th(lbl, col, align="center"):
-        return (f'<th data-col="{col}" onclick="sortTable(\'{col}\',event)" '
-                f'style="text-align:{align}">{lbl} <span class="sort-ind">↕</span></th>')
+
+    def th(lbl, col, tooltip_html, align="center", tip_left=False):
+        """Sortable header with hover tooltip."""
+        wrap_cls = "th-wrap tip-left" if tip_left else "th-wrap"
+        return (
+            f'<th data-col="{col}" onclick="sortTable(\'{col}\',event)" style="text-align:{align}">'
+            f'<span class="{wrap_cls}">'
+            f'{lbl} <span class="sort-ind">↕</span>'
+            f'<i class="tip-icon">?</i>'
+            f'<div class="col-tooltip">{tooltip_html}</div>'
+            f'</span></th>'
+        )
+
+    def th_plain(lbl, tooltip_html, tip_left=False):
+        """Non-sortable header with hover tooltip."""
+        wrap_cls = "th-wrap tip-left" if tip_left else "th-wrap"
+        return (
+            f'<th style="text-align:center">'
+            f'<span class="{wrap_cls}">'
+            f'{lbl}'
+            f'<i class="tip-icon">?</i>'
+            f'<div class="col-tooltip">{tooltip_html}</div>'
+            f'</span></th>'
+        )
+
+    # ── Tooltip content for each column ──────────────────────────────────────
+    TIP_TICKER = (
+        "<b>Ticker / Company</b><br>NSE stock symbol and company name. "
+        "Tags show FRESH breakout, NIFTY50 membership, SME, and market-cap category."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>▲ Sort A→Z</span> to scan alphabetically, or use the search box to jump to any stock."
+        "</div>"
+    )
+
+    TIP_PHASE = (
+        "<b>Market Phase</b><br>Overall trend based on price, RSI, and SMA alignment across timeframes."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>📈 UPTREND</span> — All systems aligned bullish. Best phase to enter longs.<br>"
+        "<span class='tip-watch'>➡ SIDEWAYS</span> — Consolidating. Wait for a breakout before entering.<br>"
+        "<span class='tip-sell'>📉 BEARISH</span> — Downtrend. Avoid new buys; protect open positions."
+        "</div>"
+    )
+
+    TIP_SIGNAL = (
+        "<b>Composite Signal</b><br>Derived from RSI crossovers on Daily + Weekly + Monthly timeframes combined with CCI and MACD."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>STRONG BUY</span> — All 3 TFs bullish + CCI/MACD confirm. Highest-conviction entry.<br>"
+        "<span class='tip-buy'>BUY</span> — Majority TFs bullish. Good entry with tight SL.<br>"
+        "<span class='tip-watch'>WATCH</span> — Mixed signals. Monitor for confirmation.<br>"
+        "<span class='tip-sell'>HOLD / AVOID</span> — Bearish or weakening. No new entries."
+        "</div>"
+    )
+
+    TIP_SCORE = (
+        "<b>Momentum Score (out of 21)</b><br>"
+        "Points awarded across RSI (3 TFs), CCI (3 TFs), MACD (3 TFs), Donchian breakouts (3 TFs), "
+        "Fibonacci position, fresh crossover bonus, and phase bonus."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>≥ 16 — STRONG BUY.</span> Maximum conviction. Prioritise these.<br>"
+        "<span class='tip-buy'>12–15 — BUY.</span> Strong setup. Enter with defined SL.<br>"
+        "<span class='tip-watch'>8–11 — WATCH.</span> Potential developing. Wait for score to rise.<br>"
+        "<span class='tip-sell'>&lt; 8 — AVOID.</span> Too many bearish signals. Stand aside.<br><br>"
+        "💡 Sort by Score descending to rank the strongest setups across the entire universe."
+        "</div>"
+    )
+
+    TIP_DRSI = (
+        "<b>Daily RSI(14) vs SMA(34)</b><br>"
+        "RSI(14) on the daily chart compared to its 34-period smoothing average. "
+        "The crossover of RSI above its SMA is the core entry trigger."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>▲ RSI &gt; SMA</span> — Daily momentum is bullish. Valid entry zone.<br>"
+        "<span class='tip-sell'>▼ RSI &lt; SMA</span> — Daily momentum is bearish. Avoid or exit.<br>"
+        "<b>FRESH</b> tag = crossover happened within last 3 bars — highest-quality entry signal."
+        "</div>"
+    )
+
+    TIP_WRSI = (
+        "<b>Weekly RSI(14) vs SMA(34)</b><br>"
+        "Same RSI/SMA crossover logic on the weekly chart. Weekly alignment gives medium-term trend direction."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>▲ Weekly RSI &gt; SMA</span> — Medium-term trend is up. Adds conviction to daily buy signals.<br>"
+        "<span class='tip-sell'>▼ Weekly RSI &lt; SMA</span> — Medium-term weak. Daily buy signals are lower quality.<br>"
+        "Best entries: Daily <b>AND</b> Weekly both show ▲."
+        "</div>"
+    )
+
+    TIP_MRSI = (
+        "<b>Monthly RSI(14) vs SMA(34)</b><br>"
+        "RSI/SMA crossover on the monthly chart. Monthly alignment confirms the macro bull trend."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>▲ All 3 TFs (D+W+M) above SMA</span> — Full multi-timeframe alignment. Strongest possible setup.<br>"
+        "<span class='tip-sell'>▼ Monthly RSI &lt; SMA</span> — Long-term trend is down. Even strong daily signals are counter-trend trades."
+        "</div>"
+    )
+
+    TIP_CCI = (
+        "<b>Daily CCI(20) — Commodity Channel Index</b><br>"
+        "Measures how far price is from its statistical average. Confirms momentum direction."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>&gt; 100</span> — 🚀 Strong bullish momentum. Trend is accelerating.<br>"
+        "<span class='tip-buy'>0 to 100</span> — ✅ Mild positive bias. Entry is valid but momentum moderate.<br>"
+        "<span class='tip-sell'>0 to −100</span> — ❌ Negative bias. Caution on entries.<br>"
+        "<span class='tip-sell'>&lt; −100</span> — ⚠ Extreme oversold / bearish momentum. Avoid."
+        "</div>"
+    )
+
+    TIP_MACD = (
+        "<b>Daily MACD(12,26,9) — MACD Line vs Signal Line</b><br>"
+        "Momentum oscillator. Shown value is the MACD line. Positive = MACD above Signal."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>▲ MACD &gt; Signal</span> — Bullish crossover. Trend strength increasing. Add confidence to buy.<br>"
+        "<span class='tip-sell'>▼ MACD &lt; Signal</span> — Bearish crossover. Momentum fading. Consider reducing position.<br>"
+        "Combines with RSI and CCI for a 3-indicator confirmation system."
+        "</div>"
+    )
+
+    TIP_CLOSE = (
+        "<b>Last Closing Price (₹)</b><br>"
+        "Most recent daily closing price in Indian Rupees. Used as the reference for all SL and target calculations."
+        "<div class='tip-action'>"
+        "Compare with 52W High/Low to gauge where the stock is in its range.<br>"
+        "ATR Stop-Loss and Swing SL are both calculated as a % below this price."
+        "</div>"
+    )
+
+    TIP_52W = (
+        "<b>Distance from 52-Week High (%)</b><br>"
+        "How far the current price is below its 52-week high. Momentum stocks trade close to their highs."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>−5% to 0%</span> — Near 52W high. Strong momentum; potential breakout zone.<br>"
+        "<span class='tip-watch'>−10% to −5%</span> — Modest pullback. Acceptable if other signals are bullish.<br>"
+        "<span class='tip-sell'>&lt; −10%</span> — Significantly below highs. Needs strong catalyst to recover.<br>"
+        "Sort ascending (least negative first) to find stocks at or near 52W highs."
+        "</div>"
+    )
+
+    TIP_MCAP = (
+        "<b>Market Capitalisation</b><br>"
+        "Total market value of all outstanding shares in INR Crore."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>Large Cap (&gt;₹20K Cr)</span> — Lower risk, high liquidity. Suitable for larger positions.<br>"
+        "<span class='tip-buy'>Mid Cap (₹5K–20K Cr)</span> — Balanced risk/reward. Core momentum plays.<br>"
+        "<span class='tip-watch'>Small Cap (₹500–5K Cr)</span> — Higher volatility. Use smaller position sizes.<br>"
+        "<span class='tip-sell'>Micro Cap (&lt;₹500 Cr)</span> — High risk. Verify liquidity before trading."
+        "</div>"
+    )
+
+    TIP_DONCH_D = (
+        "<b>Daily Donchian Channel Position (%)</b><br>"
+        "How close the price is to the 20-day Donchian (highest high) channel. "
+        "Near 0% = trading at or above the 20-day high — a breakout signal."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>≥ −2%</span> — At or near 20-day high. 🚀 Breakout territory. Strong buy zone.<br>"
+        "<span class='tip-watch'>−2% to −10%</span> — Slight pullback from highs. Acceptable.<br>"
+        "<span class='tip-sell'>&lt; −10%</span> — Well below highs. Momentum has stalled."
+        "</div>"
+    )
+
+    TIP_DONCH_W = (
+        "<b>Weekly Donchian Channel Position (%)</b><br>"
+        "Same as D-Donch but on the weekly timeframe (20-week high). "
+        "Weekly breakouts signal multi-month momentum."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>≥ −2%</span> — At multi-week highs. Strong weekly breakout — high-quality momentum.<br>"
+        "<span class='tip-watch'>−2% to −10%</span> — Mild pullback. Consolidation phase.<br>"
+        "<span class='tip-sell'>&lt; −10%</span> — Weekly momentum has cooled significantly."
+        "</div>"
+    )
+
+    TIP_DONCH_M = (
+        "<b>Monthly Donchian Channel Position (%)</b><br>"
+        "Distance from the 20-month Donchian high. The strongest momentum stocks break out on all 3 Donchian timeframes simultaneously."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>All 3 Donchian ≥ −2%</span> — Multi-timeframe Donchian breakout. "
+        "Rarest and most powerful momentum signal. Mark these as high-priority.<br>"
+        "<span class='tip-sell'>&lt; −10%</span> — Monthly highs not yet challenged."
+        "</div>"
+    )
+
+    TIP_N50 = (
+        "<b>Rank vs Nifty 50</b><br>"
+        "Percentile rank of this stock's momentum score compared to all 50 Nifty50 stocks in the scan. "
+        "Shows relative strength against India's benchmark index."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>Top 20%</span> — Outperforming most Nifty50 blue-chips. Institutional-grade momentum.<br>"
+        "<span class='tip-watch'>20–60%</span> — In-line with the index.<br>"
+        "<span class='tip-sell'>Bottom 40%</span> — Underperforming the index. Avoid unless a specific catalyst exists."
+        "</div>"
+    )
+
+    TIP_UNIV = (
+        "<b>Rank vs All NSE Stocks</b><br>"
+        "Percentile rank against every stock in the scan universe. "
+        "This is the ultimate momentum filter — it shows where this stock stands in the entire NSE market."
+        "<div class='tip-action'>"
+        "<span class='tip-buy'>Top 10%</span> — 🏆 Market leader. These are the best momentum stocks in NSE right now.<br>"
+        "<span class='tip-buy'>Top 25%</span> — Strong relative performer. High priority watchlist.<br>"
+        "<span class='tip-watch'>25–50%</span> — Average momentum. Only trade if other signals are very strong.<br>"
+        "<span class='tip-sell'>Bottom 50%</span> — Laggard. Capital is better deployed elsewhere.<br><br>"
+        "💡 <b>Sort by this column descending</b> for an instant ranked list of today's strongest momentum stocks."
+        "</div>"
+    )
 
     return f"""
     <div class="sort-hint">
       💡 Click header to sort &nbsp;|&nbsp; <b>Shift+click</b> = add 2nd/3rd sort key &nbsp;|&nbsp;
-      Click again to toggle ▲▼ &nbsp;|&nbsp; Shows {PAGE_TBL} rows per page
+      Click again to toggle ▲▼ &nbsp;|&nbsp; Shows {PAGE_TBL} rows per page &nbsp;|&nbsp;
+      Hover <b>?</b> on any column for guidance
     </div>
     <div class="table-wrap">
       <table class="sum-table" id="sumtable">
         <thead><tr>
-          {th('Ticker / Company', 'ticker', 'left')}
-          <th>Phase</th><th>Signal</th>
-          <th data-col="score" onclick="sortTable('score',event)" style="text-align:center" title="Higher score means a stronger setup. Use Score to rank and filter trades; focus on top-scoring stocks for the best opportunities.">Score <span class="sort-ind">↕</span></th>
-          {th('D-RSI/SMA','rsid')}
-          {th('W-RSI',    'rsiw')}
-          {th('M-RSI',    'rsim')}
-          {th('D-CCI',    'cci')}
-          {th('D-MACD',   'macd')}
-          {th('Close',    'close')}
-          {th('52W%',     'dist52')}
-          <th style="text-align:center">Market Cap</th>
-          {th('D-Donch', 'donchd')}
-          {th('W-Donch', 'donchw')}
-          {th('M-Donch', 'donchm')}
-          {th('vs N50',   'rn50')}
-          {th('vs All',   'runiv')}
+          {th('Ticker / Company', 'ticker', TIP_TICKER, 'left')}
+          {th_plain('Phase',     TIP_PHASE)}
+          {th_plain('Signal',    TIP_SIGNAL)}
+          {th('Score',   'score',  TIP_SCORE)}
+          {th('D-RSI/SMA','rsid', TIP_DRSI)}
+          {th('W-RSI',    'rsiw', TIP_WRSI)}
+          {th('M-RSI',    'rsim', TIP_MRSI)}
+          {th('D-CCI',    'cci',  TIP_CCI)}
+          {th('D-MACD',   'macd', TIP_MACD)}
+          {th('Close',    'close',TIP_CLOSE)}
+          {th('52W%',   'dist52', TIP_52W)}
+          {th_plain('Market Cap', TIP_MCAP)}
+          {th('D-Donch', 'donchd', TIP_DONCH_D)}
+          {th('W-Donch', 'donchw', TIP_DONCH_W)}
+          {th('M-Donch', 'donchm', TIP_DONCH_M, tip_left=True)}
+          {th('vs N50',   'rn50',  TIP_N50,     tip_left=True)}
+          {th('vs All',   'runiv', TIP_UNIV,    tip_left=True)}
         </tr></thead>
         <tbody id="tbl-body"></tbody>
       </table>
@@ -2492,7 +2804,8 @@ _HTML_FIELDS = {
     'sell_conds','score','phase','signal','sig_cls','fresh_d','fresh_d_bars','fresh_w',
     'fresh_w_bars','donchian_d','donchian_w','donchian_m','is_nifty50','is_sme','sector','indices','marketcap','cap_cat','cap_cls',
     'rank_nifty50','rank_nifty50_pos','rank_nifty50_of','rank_universe','rank_univ_pos',
-    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','has_chart'
+    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','has_chart',
+    'ath_price','ath_date','ath_pct','is_ath','ath_time_str'
 }
 
 
@@ -2514,6 +2827,20 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
     n_n50 = sum(1 for d in all_results if d["is_nifty50"])
     n_sme = sum(1 for d in all_results if d["is_sme"])
     total = len(all_results)
+
+    # Signal counts for dropdown badges
+    n_sig_sb  = sum(1 for d in all_results if d.get("sig_cls") == "sig-strong-buy")
+    n_sig_buy = sum(1 for d in all_results if d.get("sig_cls") == "sig-buy")
+    n_sig_wat = sum(1 for d in all_results if d.get("sig_cls") == "sig-watch")
+    n_sig_av  = sum(1 for d in all_results if d.get("sig_cls") == "sig-avoid")
+    n_sig_neu = sum(1 for d in all_results if d.get("sig_cls") == "sig-neutral")
+
+    # ATH proximity counts for dropdown badges
+    n_ath_at   = sum(1 for d in all_results if d.get("is_ath"))
+    n_ath_5    = sum(1 for d in all_results if not d.get("is_ath") and d.get("ath_pct") is not None and d["ath_pct"] >= -5)
+    n_ath_10   = sum(1 for d in all_results if not d.get("is_ath") and d.get("ath_pct") is not None and d["ath_pct"] >= -10)
+    n_ath_20   = sum(1 for d in all_results if not d.get("is_ath") and d.get("ath_pct") is not None and d["ath_pct"] >= -20)
+    n_ath_far  = sum(1 for d in all_results if d.get("ath_pct") is not None and d["ath_pct"] < -20)
 
     sec_opts, idx_opts = _build_filter_options(all_results)
 
@@ -2557,6 +2884,22 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
         <select id="idxSel" class="filter-select" onchange="onDropChange()">
           <option value="all">📊 All Indices</option>
           {idx_opts}
+        </select>
+        <select id="sigSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">📶 All Signals</option>
+          <option value="sig-strong-buy">🚀 Strong Buy ({n_sig_sb})</option>
+          <option value="sig-buy">✅ Buy ({n_sig_buy})</option>
+          <option value="sig-watch">👀 Watch ({n_sig_wat})</option>
+          <option value="sig-avoid">❌ Avoid ({n_sig_av})</option>
+          <option value="sig-neutral">⚪ Neutral ({n_sig_neu})</option>
+        </select>
+        <select id="athSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">🏔 All ATH Distances</option>
+          <option value="at">🏆 At ATH ({n_ath_at})</option>
+          <option value="w5">✅ Within 5% of ATH ({n_ath_5})</option>
+          <option value="w10">🟡 Within 10% of ATH ({n_ath_10})</option>
+          <option value="w20">🟠 Within 20% of ATH ({n_ath_20})</option>
+          <option value="far">📉 More than 20% below ATH ({n_ath_far})</option>
         </select>
         <button class="clear-btn" onclick="clearAll()">✖ Clear</button>
         <span class="results-info">Showing <b id="rc">{total}</b> of {total} stocks</span>
