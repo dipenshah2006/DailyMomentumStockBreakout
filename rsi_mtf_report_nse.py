@@ -29,6 +29,10 @@ SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
 MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise top N stocks
+# Allow GitHub Actions (or any CI) to cap chart count via env variable
+_chart_override = os.environ.get("MAX_CHART_STOCKS_OVERRIDE", "")
+if _chart_override.isdigit():
+    MAX_CHART_STOCKS = int(_chart_override)
 CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
 CHART_BARS          = 120       # bars per chart (fewer = smaller PNG)
 CHART_DPI           = 200       # Ultra HD charts — crisp, professional quality
