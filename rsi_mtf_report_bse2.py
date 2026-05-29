@@ -19,12 +19,9 @@ OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 # USER CONFIG
 # ═════════════════════════════════════════════════════════════════════════════
 
-LOCAL_NSE_CSV       = "india/NSE/NSECash/EQUITY_L.csv"
-NSE_CSV_URL         = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-SERIES_FILTER       = ["EQ"]       # NSE equity series (EQ = cash equities)
-
-LOCAL_SME_CSV       = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
-SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
+LOCAL_BSE_CSV       = "india/BSE/BSEcash/BSE_EQ_SCRIP_02012025_1780023206863.csv"
+BSE_CSV_URL         = "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active"
+BSE_SERIES_FILTER   = ["EQ"]       # BSE equity series (EQ = cash equities)
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 80
@@ -163,7 +160,7 @@ def log_error(ticker: str, company: str, stage: str, exc: Exception):
     """
     tb = traceback.format_exc()
     _logger.error(
-        f"TICKER='{ticker}.NS' | COMPANY={company!r:35s} | STAGE={stage}\n"
+        f"TICKER='{ticker}.BO' | COMPANY={company!r:35s} | STAGE={stage}\n"
         f"  ERROR : {type(exc).__name__}: {exc}\n"
         f"  TRACE :\n{tb}"
     )
@@ -172,7 +169,7 @@ def log_info(msg: str):
     _logger.info(msg)
 
 def log_warn(ticker: str, company: str, msg: str):
-    _logger.warning(f"TICKER='{ticker}.NS' | COMPANY={company!r:35s} | {msg}")
+    _logger.warning(f"TICKER='{ticker}.BO' | COMPANY={company!r:35s} | {msg}")
 
 
 def format_timespan(seconds: float) -> str:
@@ -459,7 +456,7 @@ def _batch_download(tickers: list[str], period: str | None = None,
         return {}
     results = {}
     args = {
-        "tickers": [t + ".NS" for t in tickers],
+        "tickers": [t + ".BO" for t in tickers],
         "interval": "1d",
         "progress": False,
         "auto_adjust": True,
@@ -485,7 +482,7 @@ def _batch_download(tickers: list[str], period: str | None = None,
         return {}
 
     for ticker in tickers:
-        ns = ticker + ".NS"
+        ns = ticker + ".BO"
         try:
             if isinstance(raw.columns, pd.MultiIndex):
                 if ns in raw.columns.get_level_values(0):
@@ -985,6 +982,33 @@ def _parse_nse_csv(text: str, series_filters: list[str], is_sme: bool = False) -
 
     return tickers
 
+
+def _parse_bse_csv(text: str, series_filters: list[str]) -> list[str]:
+    """Parse BSE scrip CSV (BSE_EQ_SCRIP_*.csv) and return list of ticker symbols.
+
+    BSE CSV columns relevant here:
+      TckrSymb  — ticker symbol (may contain trailing # for ex-date stocks)
+      SctySrs   — series code (EQ, BE, BZ, …)
+      FinInstrmNm — full company name
+    """
+    text = text.lstrip('﻿')   # strip BOM
+    reader = csv.DictReader(io.StringIO(text))
+    tickers = []
+    for row in reader:
+        if not row:
+            continue
+        clean = {k.strip(): (v.strip() if isinstance(v, str) else v)
+                 for k, v in row.items() if k}
+        series = clean.get("SctySrs", "").strip()
+        symbol = clean.get("TckrSymb", "").strip().rstrip("#")  # drop trailing #
+        name   = clean.get("FinInstrmNm", "").strip()
+        if symbol and series in series_filters:
+            tickers.append(symbol)
+            if name:
+                _COMPANY_MAP[symbol] = name
+    return tickers
+
+
 def load_universe() -> list[str]:
     global _CACHE
     _populate_indices()          # Populate index membership mapping
@@ -992,61 +1016,44 @@ def load_universe() -> list[str]:
 
     all_tickers = []
 
-    # Load NSE EQ stocks
-    if os.path.exists(LOCAL_NSE_CSV):
+    # ── Primary: local BSE EQ CSV ────────────────────────────────────────────
+    if os.path.exists(LOCAL_BSE_CSV):
         try:
-            with open(LOCAL_NSE_CSV, encoding="utf-8", errors="replace") as f:
+            with open(LOCAL_BSE_CSV, encoding="utf-8", errors="replace") as f:
                 raw = f.read()
-            t = _parse_nse_csv(raw, SERIES_FILTER, is_sme=False)
+            t = _parse_bse_csv(raw, BSE_SERIES_FILTER)
             if t:
-                print(f"  ✅ Local '{LOCAL_NSE_CSV}': {len(t)} EQ stocks | "
+                print(f"  ✅ Local '{LOCAL_BSE_CSV}': {len(t)} EQ stocks | "
                       f"{len(_COMPANY_MAP)} companies mapped")
                 all_tickers.extend(t)
-        except Exception as e:
-            print(f"  [!] Local NSE CSV error: {e}")
-
-    # Load NSE SME stocks
-    if os.path.exists(LOCAL_SME_CSV):
-        try:
-            with open(LOCAL_SME_CSV, encoding="utf-8", errors="replace") as f:
-                raw = f.read()
-            t_sme = _parse_nse_csv(raw, SME_SERIES_FILTER, is_sme=True)
-            # Safety net: ensure every ticker returned is in _SME_STOCKS
-            for sym in t_sme:
-                _SME_STOCKS.add(sym)
-            if t_sme:
-                print(f"  ✅ Local '{LOCAL_SME_CSV}': {len(t_sme)} SME stocks"
-                      f"  |  {len(_SME_STOCKS)} total in SME set")
-                all_tickers.extend(t_sme)
             else:
-                print(f"  ⚠️  SME CSV found but 0 symbols parsed — check CSV format")
+                print(f"  ⚠️  BSE CSV found but 0 EQ symbols parsed — check CSV format")
         except Exception as e:
-            print(f"  [!] Local SME CSV error: {e}")
+            print(f"  [!] Local BSE CSV error: {e}")
 
     if all_tickers:
-        return list(dict.fromkeys(all_tickers))  # Remove duplicates while preserving order
+        return list(dict.fromkeys(all_tickers))  # Remove duplicates, preserve order
 
-    # Fallback to live download if local files don't exist
+    # ── Fallback: live BSE API ────────────────────────────────────────────────
     try:
         s = requests.Session()
         s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "*/*"})
-        s.get("https://www.nseindia.com/", timeout=12)
-        time.sleep(1.5)
-        s.headers["Referer"] = "https://www.nseindia.com/"
-        r = s.get(NSE_CSV_URL, timeout=20)
+        r = s.get(BSE_CSV_URL, timeout=20)
         r.raise_for_status()
-        t = _parse_nse_csv(r.text, SERIES_FILTER, is_sme=False)
+        t = _parse_bse_csv(r.text, BSE_SERIES_FILTER)
         if t:
-            print(f"  ✅ Live NSE: {len(t)} EQ stocks | {len(_COMPANY_MAP)} companies")
+            print(f"  ✅ Live BSE API: {len(t)} EQ stocks | {len(_COMPANY_MAP)} companies")
             try:
-                with open(LOCAL_NSE_CSV, "w", encoding="utf-8") as f:
+                os.makedirs(os.path.dirname(LOCAL_BSE_CSV), exist_ok=True)
+                with open(LOCAL_BSE_CSV, "w", encoding="utf-8") as f:
                     f.write(r.text)
-                print(f"  💾 Saved → '{LOCAL_NSE_CSV}'")
+                print(f"  💾 Saved → '{LOCAL_BSE_CSV}'")
             except Exception:
                 pass
             all_tickers.extend(t)
+            return list(dict.fromkeys(all_tickers))
     except Exception as e:
-        print(f"  [!] NSE download failed: {e}")
+        print(f"  [!] BSE live download failed: {e}")
 
     print(f"  ⚠️  Using built-in list: {len(BUILTIN)} stocks")
     return list(dict.fromkeys(BUILTIN))
@@ -1065,7 +1072,7 @@ def analyze_stock(ticker: str) -> dict | None:
         df = _get_df(ticker)
         if df is None:
             # Fallback: single download if prefetch missed this ticker
-            raw = yf.download(ticker + ".NS", period=DATA_PERIOD, interval="1d",
+            raw = yf.download(ticker + ".BO", period=DATA_PERIOD, interval="1d",
                               progress=False, auto_adjust=True)
             df  = _clean_df(raw)
             if len(df) >= min_candles:
