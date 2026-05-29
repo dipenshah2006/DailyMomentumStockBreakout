@@ -1,0 +1,64 @@
+name: Generate NSE RSI Report
+
+on:
+  push:
+    paths:
+      - 'india/NSE/**'          # triggers when CSV files are updated
+  schedule:
+    - cron: '30 23 * * 0-4'    # 5:00 AM IST (Mon–Fri) = 11:30 PM UTC Sun–Thu
+  workflow_dispatch:             # also allows manual trigger from GitHub UI
+
+jobs:
+  generate-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120         # 2-hour cap (2000+ stocks can take ~60 min)
+
+    permissions:
+      contents: write            # needed to commit report back to repo
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate NSE RSI MTF Report
+        run: python rsi_mtf_report_nse.py
+        env:
+          MAX_CHART_STOCKS_OVERRIDE: "200"   # cap charts for Pages size limit
+
+      - name: Prepare GitHub Pages output
+        run: |
+          mkdir -p _site
+          # Copy the latest generated report as index.html
+          latest=$(ls -t rsi_mtf_report_*.html 2>/dev/null | head -1)
+          if [ -n "$latest" ]; then
+            cp "$latest" _site/index.html
+            echo "✅ Report: $latest → _site/index.html"
+          else
+            echo "❌ No report HTML found"
+            exit 1
+          fi
+          # Copy charts folder if it exists
+          if [ -d "charts" ]; then
+            cp -r charts/ _site/charts/
+            echo "✅ Charts copied"
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
