@@ -33,6 +33,7 @@ CONFIG — edit the block below to tune thresholds:
 # ─────────────────────────────────────────────────────────────────
 
 NSE_CSV_URL     = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+LOCAL_NSE_CSV   = "india/NSE/NSECash/EQUITY_L.csv"   # local fallback (used if present)
 CUSTOM_FILE     = "my_stocks.txt"   # optional: your own tickers, one per line
 
 # Which NSE series to include
@@ -78,16 +79,31 @@ warnings.filterwarnings("ignore")
 
 def fetch_nse_universe():
     """
-    Downloads the NSE equity master file from nsearchives.nseindia.com.
-
-    NSE requires:
-      1. A valid browser User-Agent header.
-      2. A session cookie obtained by first visiting nseindia.com.
-      3. The Referer header set to nseindia.com when fetching the CSV.
-
     Returns a list of ticker symbols filtered by SERIES_FILTER.
+    Uses local CSV if present, otherwise downloads from NSE.
     Falls back to the built-in list on any network/auth error.
     """
+    # ── Local CSV takes priority (faster, no network dependency) ──
+    if os.path.exists(LOCAL_NSE_CSV):
+        try:
+            with open(LOCAL_NSE_CSV, encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            reader  = csv.DictReader(io.StringIO(raw))
+            tickers = []
+            total_rows = 0
+            for row in reader:
+                total_rows += 1
+                series = row.get(" SERIES", row.get("SERIES", "")).strip()
+                symbol = row.get("SYMBOL", "").strip()
+                if symbol and series in SERIES_FILTER:
+                    tickers.append(symbol)
+            series_str = ", ".join(SERIES_FILTER)
+            print(f"  ✅ Local '{LOCAL_NSE_CSV}': {total_rows} stocks → "
+                  f"{len(tickers)} in series [{series_str}]")
+            return tickers
+        except Exception as e:
+            print(f"  [!] Local CSV error: {e} — falling back to NSE download.")
+
     session = requests.Session()
     session.headers.update({
         "User-Agent": (
