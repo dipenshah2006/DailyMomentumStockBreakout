@@ -3,62 +3,148 @@ name: Generate NSE RSI Report
 on:
   push:
     paths:
-      - 'india/NSE/**'          # triggers when CSV files are updated
+      - 'india/NSE/**'           # triggers when CSV files are updated
   schedule:
-    - cron: '30 23 * * 0-4'    # 5:00 AM IST (Mon–Fri) = 11:30 PM UTC Sun–Thu
-  workflow_dispatch:             # also allows manual trigger from GitHub UI
+    - cron: '30 23 * * 0-4'     # 5:00 AM IST (Mon–Fri) = 11:30 PM UTC Sun–Thu
+  workflow_dispatch:             # manual trigger from GitHub UI
+    inputs:
+      max_chart_stocks:
+        description: 'Max stocks to chart (0=all, 50=faster)'
+        required: false
+        default: '50'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   generate-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 120         # 2-hour cap (2000+ stocks can take ~60 min)
+    timeout-minutes: 120
 
-    permissions:
-      contents: write            # needed to commit report back to repo
-      pages: write
-      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── 2. Python setup ────────────────────────────────────────────────────
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
 
+      # ── 3. Install dependencies ────────────────────────────────────────────
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" \
+            "pandas>=2.0.0" \
+            "numpy>=1.24.0" \
+            "matplotlib>=3.7.0" \
+            "requests>=2.31.0" \
+            "openpyxl>=3.1.0"
 
+      # ── 4. Restore stock data cache ────────────────────────────────────────
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-${{ runner.os }}-${{ hashFiles('rsi_mtf_report_nse.py') }}
+          restore-keys: |
+            stock-cache-${{ runner.os }}-
+
+      # ── 5. Restore chart PNG cache ─────────────────────────────────────────
+      - name: Restore chart cache
+        uses: actions/cache@v4
+        with:
+          path: charts/
+          key: chart-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            chart-cache-${{ runner.os }}-
+
+      # ── 6. Create required directories ─────────────────────────────────────
+      - name: Create directories
+        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts
+
+      # ── 7. Download NSE equity list (graceful on WAF block) ────────────────
+      - name: Download NSE equity list
+        run: |
+          curl -sL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Referer: https://www.nseindia.com/" \
+            --retry 3 --retry-delay 5 --max-time 30 \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
+          || echo "⚠️  NSE CSV blocked — script will use built-in ticker list"
+
+      # ── 8. Run the report ──────────────────────────────────────────────────
       - name: Generate NSE RSI MTF Report
-        run: python rsi_mtf_report_nse.py
         env:
-          MAX_CHART_STOCKS_OVERRIDE: "200"   # cap charts for Pages size limit
+          MAX_CHART_STOCKS_OVERRIDE: ${{ github.event.inputs.max_chart_stocks || '50' }}
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python rsi_mtf_report_nse.py
 
+      # ── 9. Verify & prepare GitHub Pages ──────────────────────────────────
       - name: Prepare GitHub Pages output
         run: |
           mkdir -p _site
-          # Copy the latest generated report as index.html
-          latest=$(ls -t rsi_mtf_report_*.html 2>/dev/null | head -1)
-          if [ -n "$latest" ]; then
-            cp "$latest" _site/index.html
-            echo "✅ Report: $latest → _site/index.html"
+
+          # Accept the fixed output filename the script uses
+          if [ -f "rsi_mtf_report_NSE.html" ]; then
+            cp rsi_mtf_report_NSE.html _site/index.html
+            echo "✅ Report copied: $(du -sh rsi_mtf_report_NSE.html | cut -f1)"
           else
-            echo "❌ No report HTML found"
-            exit 1
-          fi
-          # Copy charts folder if it exists
-          if [ -d "charts" ]; then
-            cp -r charts/ _site/charts/
-            echo "✅ Charts copied"
+            # Fallback: pick newest timestamped report
+            latest=$(ls -t rsi_mtf_report_*.html 2>/dev/null | head -1)
+            if [ -n "$latest" ]; then
+              cp "$latest" _site/index.html
+              echo "✅ Report copied: $latest"
+            else
+              echo "❌ No report HTML found!"
+              exit 1
+            fi
           fi
 
+          # Copy charts
+          if [ -d "charts" ] && ls charts/*.png &>/dev/null; then
+            cp -r charts/ _site/charts/
+            echo "✅ Charts: $(ls charts/*.png | wc -l) files"
+          fi
+
+          # Copy error log for diagnostics
+          ls error_log_*.txt &>/dev/null && cp error_log_*.txt _site/ || true
+
+      # ── 10. Upload HTML as artifact (always, for debugging) ────────────────
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-report-run-${{ github.run_number }}
+          path: |
+            rsi_mtf_report_NSE.html
+            error_log_*.txt
+          retention-days: 14
+
+      # ── 11. Upload Pages artifact ──────────────────────────────────────────
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
+      # ── 12. Deploy to GitHub Pages ─────────────────────────────────────────
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
