@@ -233,3 +233,5 @@
 2026-05-30 11:05:43 | WARNING | TICKER='AMCL.NS' | COMPANY='AMCL'                              | Insufficient data: 0 bars < 1 required
 2026-05-30 11:05:44 | WARNING | TICKER='FORGEAUTO.NS' | COMPANY='FORGEAUTO'                         | Insufficient data: 0 bars < 1 required
 2026-05-30 11:05:44 | INFO | Analysis done: 2429 ok, 230 failed, 296s
+2026-05-30 11:19:51 | INFO | HTML saved: /home/runner/workspace/rsi_mtf_report_NSE.html (5.9 MB)
+2026-05-30 11:19:51 | INFO | === Run complete ===
