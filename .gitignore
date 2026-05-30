@@ -1,0 +1,23 @@
+# Generated output files
+charts/
+*.pkl
+*.tmp
+error_log_*.txt
+rsi_mtf_report_*.html
+rsi_mtf_report_*.html.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
