@@ -15,6 +15,8 @@ RUN:      python rsi_mtf_report_v2.py
 OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 """
 
+import os
+
 # ═════════════════════════════════════════════════════════════════════════════
 # USER CONFIG
 # ═════════════════════════════════════════════════════════════════════════════
