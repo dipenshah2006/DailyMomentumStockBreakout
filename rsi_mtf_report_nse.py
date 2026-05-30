@@ -16,6 +16,7 @@ OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 """
 
 import os
+import glob as _glob
 
 # ═════════════════════════════════════════════════════════════════════════════
 # USER CONFIG
@@ -25,7 +26,13 @@ LOCAL_NSE_CSV       = "india/NSE/NSECash/EQUITY_L.csv"
 NSE_CSV_URL         = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 SERIES_FILTER       = ["EQ"]       # NSE equity series (EQ = cash equities)
 
-LOCAL_SME_CSV       = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
+def _find_latest_sme_csv(folder: str = "india/NSE/NSESME") -> str:
+    """Return the most recently modified SME CSV in the folder, or empty string."""
+    pattern = os.path.join(folder, "MW-SME-*.csv")
+    files = sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    return files[0] if files else ""
+
+LOCAL_SME_CSV       = _find_latest_sme_csv()   # dynamic — not hardcoded to a date
 SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
 
 DATA_PERIOD         = "max"
@@ -117,7 +124,7 @@ import sys
 import time
 import traceback
 import warnings
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor as ProcessPoolExecutor, as_completed
 from datetime import datetime
 
 import argparse
@@ -441,12 +448,16 @@ def _merge_df(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
 # ── Single-ticker clean download ────────────────────────────────────────────
 
 def _clean_df(raw) -> pd.DataFrame:
-    """Flatten MultiIndex columns and drop NaN rows."""
+    """Flatten MultiIndex columns safely regardless of yfinance version."""
     if raw is None or raw.empty:
         return pd.DataFrame()
     df = raw.copy()
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
+        l0_vals = df.columns.get_level_values(0).tolist()
+        if any(c in l0_vals for c in ("Open", "High", "Low", "Close", "Volume")):
+            df.columns = df.columns.droplevel(1)   # yfinance >= 0.2.38: metric at level 0
+        else:
+            df.columns = df.columns.droplevel(0)   # older format: ticker at level 0
     return df.dropna(subset=["Close"])
 
 # ── Batch download ──────────────────────────────────────────────────────────
@@ -966,25 +977,12 @@ def _parse_nse_csv(text: str, series_filters: list[str], is_sme: bool = False) -
     text = text.lstrip('\ufeff')  # Remove BOM if present
     
     if is_sme:
-        # SURGICAL FIX: Identify and fix header line only
-        # Strategy: Find where first stock symbol appears, then extract header before it
-        # Then fix the embedded \n in that header line
-        
-        # Look for the first stock symbol pattern (starting with uppercase letter)
-        # First data row starts with quote: "SYMBOL_NAME"
-        # We'll look for a known pattern: after header closing quote, we have \n then first stock
-        
-        # Find where actual data line starts (look for first quote followed by stock symbol)
-        # Safe approach: find the last \n that comes before the first non-header row
-        # The first data row has the first stock in it (e.g., "ADISOFT")
-        
-        # Since we don't know stock names, find pattern: `\n"` followed by quoted data
-        # Better: the header is ONE line with embedded \n, then real data starts
-        # Find the end of header by looking for the pattern where quoted field ends before real \n
-        
-        # Simplest: replace all ` \n` (space-newline) with space in one pass
-        # This targets the specific pattern in field names like "SYMBOL \n"
-        text = re.sub(r' \n', ' ', text)
+        # FIX: apply the embedded-newline cleanup only to the header line,
+        # not the full body (which would merge real data rows together).
+        lines = text.splitlines(keepends=True)
+        if lines:
+            lines[0] = re.sub(r' \n', ' ', lines[0])
+        text = "".join(lines)
     
     # NOW parse the (hopefully fixed) CSV
     _build_company_map(text)
@@ -1034,7 +1032,7 @@ def load_universe() -> list[str]:
     all_tickers = []
 
     # Load NSE EQ stocks
-    if os.path.exists(LOCAL_NSE_CSV):
+    if os.path.exists(LOCAL_NSE_CSV) and os.path.getsize(LOCAL_NSE_CSV) > 512:
         try:
             with open(LOCAL_NSE_CSV, encoding="utf-8", errors="replace") as f:
                 raw = f.read()
@@ -3137,8 +3135,10 @@ def main(force_charts: bool = False):
         try: os.remove(_old)
         except: pass
 
-    with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
+    _TMP_HTML = OUTPUT_HTML + ".tmp"
+    with open(_TMP_HTML, "w", encoding="utf-8") as f:
         f.write(html)
+    os.replace(_TMP_HTML, OUTPUT_HTML)   # atomic rename — no partial HTML on crash
 
     size_mb = os.path.getsize(OUTPUT_HTML) / 1024 / 1024
     total_elapsed = time.time() - START_TIME

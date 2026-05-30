@@ -1,0 +1,197 @@
+"""
+rsi_mtf_fixes.py  — Patch notes & inline fixes for rsi_mtf_report_nse.py
+==========================================================================
+
+ISSUES FOUND & FIXED
+---------------------
+
+1. LOCAL_SME_CSV hardcoded to a date-specific filename
+   ────────────────────────────────────────────────────
+   BUG:  LOCAL_SME_CSV = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
+         This file name changes every week → FileNotFoundError in CI.
+   FIX:  Glob for the newest matching file in the folder; fall back gracefully.
+
+2. os module used before import block
+   ────────────────────────────────────
+   BUG:  _chart_override = os.environ.get(...) is at module top-level but
+         `import os` only appears inside the IMPORTS section below the config
+         block.  Works locally only because Python caches the module, but
+         fails in fresh CI environments with NameError: name 'os' is not defined.
+   FIX:  Add `import os` at the very top of the file (before USER CONFIG).
+
+3. ProcessPoolExecutor + matplotlib on Linux CI
+   ──────────────────────────────────────────────
+   BUG:  Forked subprocesses can deadlock when the parent imported matplotlib
+         before forking (common on Linux with the Agg backend).
+   FIX:  Use the "spawn" start method in the chart worker pool, or replace
+         ProcessPoolExecutor with ThreadPoolExecutor for chart generation.
+
+4. yfinance 0.2.x MultiIndex column handling
+   ──────────────────────────────────────────
+   BUG:  When downloading a single ticker, yf.download returns flat columns.
+         When downloading multiple tickers, it returns a MultiIndex.
+         The existing droplevel(1) call assumes the ticker name is level 0,
+         but newer yfinance versions put the metric (Open/Close/…) at level 0
+         and the ticker at level 1.  This causes KeyError on column access.
+   FIX:  Detect column order and droplevel the correct axis.
+
+5. SME CSV header has embedded \\n in quoted field names
+   ───────────────────────────────────────────────────────
+   BUG:  re.sub(r' \\n', ' ', text) is applied to the FULL file body, which
+         strips real newlines that happen to be preceded by a space — corrupting
+         multi-line data rows and merging them into a single long line.
+   FIX:  Apply the regex only to the first line (the header line).
+
+6. GitHub Actions: NSE CSV download blocked by WAF
+   ──────────────────────────────────────────────────
+   BUG:  nsearchives.nseindia.com blocks GitHub Actions IPs; curl returns 403.
+         Script then tries to open the empty/missing file and crashes.
+   FIX:  Add a robust fallback: if the downloaded file is empty or missing,
+         skip the CSV load and use the built-in BUILTIN ticker list.
+
+7. Output HTML file opened in write mode before checks
+   ──────────────────────────────────────────────────────
+   BUG:  If the script crashes mid-run, OUTPUT_HTML is left as an empty or
+         partial file, causing GitHub Pages to serve a blank page.
+   FIX:  Write to a .tmp file first, then atomically rename to OUTPUT_HTML.
+
+All fixes are self-contained — apply them to rsi_mtf_report_nse.py as described.
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 1 & 2 — Add at the very top of rsi_mtf_report_nse.py (line 1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+TOP_OF_FILE_PATCH = '''
+import os   # ← FIX 2: must be imported BEFORE USER CONFIG block uses os.environ
+import sys
+'''
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 1 — Replace the LOCAL_SME_CSV constant with a glob-based loader
+# ═══════════════════════════════════════════════════════════════════════════
+
+SME_CSV_FIX = '''
+import glob as _glob
+
+def _find_latest_sme_csv(folder: str = "india/NSE/NSESME") -> str:
+    """Return the most recently modified SME CSV in the folder, or empty string."""
+    pattern = os.path.join(folder, "MW-SME-*.csv")
+    files = sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    return files[0] if files else ""
+
+LOCAL_SME_CSV = _find_latest_sme_csv()   # ← FIX 1: dynamic, not hardcoded
+'''
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 3 — Replace ProcessPoolExecutor with ThreadPoolExecutor for charts
+# ═══════════════════════════════════════════════════════════════════════════
+# In the chart generation section, change:
+#   from concurrent.futures import ProcessPoolExecutor, as_completed
+# To:
+#   from concurrent.futures import ThreadPoolExecutor as ProcessPoolExecutor, as_completed
+#
+# Or set multiprocessing start method to "spawn" at module level:
+
+MULTIPROCESSING_FIX = '''
+import multiprocessing
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
+'''
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 4 — Robust MultiIndex column flattening in _clean_df
+# ═══════════════════════════════════════════════════════════════════════════
+
+CLEAN_DF_FIX = '''
+def _clean_df(raw) -> pd.DataFrame:
+    """Flatten MultiIndex columns safely regardless of yfinance version."""
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    df = raw.copy()
+    if isinstance(df.columns, pd.MultiIndex):
+        # yfinance >= 0.2.38: level 0 = metric, level 1 = ticker  → drop level 1
+        # yfinance <  0.2.38: level 0 = ticker, level 1 = metric  → drop level 0
+        # Detect by checking if known OHLCV names appear in level 0
+        l0_vals = df.columns.get_level_values(0).tolist()
+        if any(c in l0_vals for c in ("Open", "High", "Low", "Close", "Volume")):
+            df.columns = df.columns.droplevel(1)   # new format
+        else:
+            df.columns = df.columns.droplevel(0)   # old format
+    return df.dropna(subset=["Close"])
+'''
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 5 — SME CSV header embedded newline: apply regex to header line only
+# ═══════════════════════════════════════════════════════════════════════════
+
+SME_HEADER_FIX = '''
+if is_sme:
+    lines = text.splitlines(keepends=True)
+    if lines:
+        lines[0] = re.sub(r" \\n", " ", lines[0])   # fix header line only
+    text = "".join(lines)
+'''
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 6 — Graceful fallback when NSE CSV is unavailable
+# ═══════════════════════════════════════════════════════════════════════════
+
+NSE_CSV_FALLBACK_FIX = '''
+def _load_nse_csv_safe(path: str, url: str, series_filter: list[str]) -> list[str]:
+    """Load NSE CSV from local path; download from URL if missing; use BUILTIN if both fail."""
+    # Try local file
+    if os.path.exists(path) and os.path.getsize(path) > 512:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            tickers = _parse_nse_csv(text, series_filter)
+            if tickers:
+                print(f"  ✅ Loaded {len(tickers)} tickers from local {path}")
+                return tickers
+        except Exception as e:
+            print(f"  ⚠️ Local CSV parse error: {e}")
+
+    # Try downloading
+    print(f"  📥 Downloading NSE CSV from {url} ...")
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0 Safari/537.36",
+            "Accept": "text/csv,text/plain,*/*",
+            "Referer": "https://www.nseindia.com/",
+        }
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        text = resp.text
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        tickers = _parse_nse_csv(text, series_filter)
+        if tickers:
+            print(f"  ✅ Downloaded {len(tickers)} tickers from NSE")
+            return tickers
+    except Exception as e:
+        print(f"  ⚠️ NSE CSV download failed: {e}")
+
+    # Fallback to built-in list
+    print(f"  🔄 Using built-in ticker list ({len(BUILTIN)} tickers)")
+    for sym in BUILTIN:
+        _COMPANY_MAP.setdefault(sym, sym)
+    return list(BUILTIN)
+'''
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 7 — Atomic HTML write (write to .tmp, rename on success)
+# ═══════════════════════════════════════════════════════════════════════════
+
+ATOMIC_WRITE_FIX = '''
+# Replace:  with open(OUTPUT_HTML, "w", ...) as fh:
+# With:
+
+_TMP_HTML = OUTPUT_HTML + ".tmp"
+with open(_TMP_HTML, "w", encoding="utf-8") as fh:
+    fh.write(html_content)
+os.replace(_TMP_HTML, OUTPUT_HTML)   # atomic on all POSIX systems
+'''
