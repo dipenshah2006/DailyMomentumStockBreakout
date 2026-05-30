@@ -26,13 +26,7 @@ LOCAL_NSE_CSV       = "india/NSE/NSECash/EQUITY_L.csv"
 NSE_CSV_URL         = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 SERIES_FILTER       = ["EQ"]       # NSE equity series (EQ = cash equities)
 
-def _find_latest_sme_csv(folder: str = "india/NSE/NSESME") -> str:
-    """Return the most recently modified SME CSV in the folder, or empty string."""
-    pattern = os.path.join(folder, "MW-SME-*.csv")
-    files = sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    return files[0] if files else ""
-
-LOCAL_SME_CSV       = _find_latest_sme_csv()   # dynamic — not hardcoded to a date
+LOCAL_SME_CSV       = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
 SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
 
 DATA_PERIOD         = "max"
