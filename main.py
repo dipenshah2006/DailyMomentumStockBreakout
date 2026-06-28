@@ -502,6 +502,17 @@ _ADMIN_CSS = """
   .export-btn { background: transparent; border: 1px solid #475569; color: #94a3b8; border-radius: 24px;
                 padding: 7px 18px; font-size: 0.85rem; cursor: pointer; text-decoration: none; display: inline-block; }
   .export-btn:hover { border-color: #38bdf8; color: #38bdf8; }
+  .bulk-section { background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+                  padding: 16px 20px; margin-bottom: 20px; }
+  .bulk-section summary { color: #94a3b8; font-size: 0.88rem; cursor: pointer; user-select: none; list-style: none; }
+  .bulk-section summary::before { content: '▶ '; font-size: 0.75rem; }
+  details[open] summary::before { content: '▼ '; }
+  .bulk-section summary:hover { color: #38bdf8; }
+  .bulk-section textarea { width: 100%; margin-top: 12px; background: #0f172a; border: 1px solid #475569;
+    border-radius: 8px; padding: 10px 14px; color: #e2e8f0; font-size: 0.85rem; font-family: monospace;
+    resize: vertical; min-height: 100px; outline: none; }
+  .bulk-section textarea:focus { border-color: #38bdf8; }
+  .bulk-hint { font-size: 0.78rem; color: #475569; margin-top: 6px; margin-bottom: 10px; }
 """
 
 
@@ -545,6 +556,30 @@ def admin_subscribers():
                 _append_recipient(email)
                 _push_to_github(f'admin: add {email}')
                 flash = f'Added {email}'
+        elif action == 'bulk_add' and _check_admin():
+            raw = request.form.get('bulk_emails', '')
+            candidates = [e.strip().lower().strip(',') for e in re.split(r'[\n,;]+', raw) if e.strip()]
+            existing = set(_read_recipients())
+            added, skipped_dup, skipped_bad = [], [], []
+            for e in candidates:
+                if not EMAIL_RE.match(e):
+                    skipped_bad.append(e)
+                elif e in existing:
+                    skipped_dup.append(e)
+                else:
+                    _append_recipient(e)
+                    existing.add(e)
+                    added.append(e)
+            if added:
+                _push_to_github(f'admin: bulk add {len(added)} emails')
+            parts = []
+            if added:
+                parts.append(f'Added {len(added)}')
+            if skipped_dup:
+                parts.append(f'{len(skipped_dup)} already on list')
+            if skipped_bad:
+                parts.append(f'{len(skipped_bad)} invalid')
+            flash = ' · '.join(parts) if parts else 'Nothing to add.'
         elif action == 'delete' and _check_admin():
             email = request.form.get('email', '').strip().lower()
             if email:
@@ -595,6 +630,15 @@ def admin_subscribers():
   </form>
   <a class="export-btn" href="/subscribers/export">⬇ Export CSV</a>
 </div>
+<details class="bulk-section">
+  <summary>Bulk import emails</summary>
+  <form method="POST">
+    <input type="hidden" name="action" value="bulk_add">
+    <textarea name="bulk_emails" placeholder="Paste emails here — one per line, or comma/semicolon separated:&#10;alice@example.com&#10;bob@example.com, carol@example.com"></textarea>
+    <p class="bulk-hint">Duplicates and invalid addresses are automatically skipped.</p>
+    <button class="add-btn" type="submit">Import</button>
+  </form>
+</details>
 {'<table><thead><tr><th>#</th><th>Email</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' if recipients else '<p class="empty">No subscribers yet.</p>'}
 <form method="POST" style="margin-top:32px">
   <input type="hidden" name="action" value="logout">
