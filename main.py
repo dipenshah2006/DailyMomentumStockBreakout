@@ -218,6 +218,7 @@ WAITING_HTML = f"""<!DOCTYPE html>
   <div class="nav">
     <a class="btn outline" href="/ath">🏆 ATH Breakout</a>
     <a class="btn outline" href="/rocket">🚀 Rocket Scanner</a>
+    <a class="btn outline" href="/subscribers">⚙️ Admin</a>
   </div>
 
   {_SUBSCRIBE_WIDGET}
@@ -282,6 +283,7 @@ RUNNING_HTML = f"""<!DOCTYPE html>
   <div class="nav">
     <a class="btn outline" href="/ath">🏆 ATH Breakout</a>
     <a class="btn outline" href="/rocket">🚀 Rocket Scanner</a>
+    <a class="btn outline" href="/subscribers">⚙️ Admin</a>
   </div>
 
   {_SUBSCRIBE_WIDGET}
