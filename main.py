@@ -295,6 +295,22 @@ def rocket():
         return Response(f.read(), mimetype='text/html')
 
 
+@app.route('/intraday')
+def intraday():
+    path = 'intraday_report_NSE.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">⚡ Intraday Breakout Scanner</h2>'
+            '<p style="color:#94a3b8;">No intraday report yet. Run <code>python intraday_report.py</code> to generate.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back to Full Report</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
 @app.route('/charts/<path:filename>')
 def charts(filename):
     path = os.path.join('charts', filename)

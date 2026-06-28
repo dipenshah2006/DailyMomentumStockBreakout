@@ -1,12 +1,10 @@
 # 📈 DailyMomentumStockBreakout
 
-Automated NSE stock analysis toolkit that generates a daily **RSI Multi-Timeframe HTML report** and **Momentum Breakout Excel scanner** for Indian equity markets — with bulk email delivery to unlimited subscribers.
+Automated NSE stock analysis toolkit that generates daily HTML reports and emails them every morning — covering RSI Multi-Timeframe, ATH Breakouts, Multibagger picks, Rocket Scanner, and Intraday breakouts for Indian equity markets.
 
 ---
 
 ## 🔗 Live Reports — All URLs
-
-All reports are auto-generated every **weekday at 5:00 AM IST** and available via two hosting platforms:
 
 ### 📡 GitHub Pages (always-on, no login needed)
 
@@ -14,19 +12,35 @@ All reports are auto-generated every **weekday at 5:00 AM IST** and available vi
 |--------|-----|
 | 📈 RSI Multi-Timeframe Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/ |
 | 🏆 ATH Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/ath.html |
-| 🚀 Rocket Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/rocket.html |
 | 💎 Multibagger | https://dipenshah2006.github.io/DailyMomentumStockBreakout/multibagger.html |
+| 🚀 Rocket Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/rocket.html |
+| ⚡ Intraday Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/intraday.html |
 
-### 🖥️ Replit Web Dashboard (live dashboard with Run Now button)
+### 🖥️ Replit Web Dashboard (live preview with Run Now button)
 
 | Report | URL |
 |--------|-----|
 | 📈 RSI Multi-Timeframe Breakout | https://daily-momentum-stock-breakout--dipenshaah.replit.app/ |
 | 🏆 ATH Breakout | https://daily-momentum-stock-breakout--dipenshaah.replit.app/ath |
-| 🚀 Rocket Scanner | https://daily-momentum-stock-breakout--dipenshaah.replit.app/rocket |
 | 💎 Multibagger | https://daily-momentum-stock-breakout--dipenshaah.replit.app/multibagger |
+| 🚀 Rocket Scanner | https://daily-momentum-stock-breakout--dipenshaah.replit.app/rocket |
+| ⚡ Intraday Breakout | https://daily-momentum-stock-breakout--dipenshaah.replit.app/intraday |
 
-> **Tip:** GitHub Pages is the fastest way to share reports with subscribers — no login required, bookmark-friendly, and always shows the latest run.
+> **Tip:** GitHub Pages is the fastest way to share reports — no login required, bookmark-friendly, always shows the latest run.
+
+---
+
+## 📅 Automated Email Schedule
+
+| Time (IST) | Days | Email |
+|-----------|------|-------|
+| 5:00 AM | Mon – Sat | 📈 RSI MTF Breakout Report |
+| 5:00 AM | Mon – Sat | 🏆 ATH Breakout Report |
+| 5:00 AM | Mon – Sat | 💎 Multibagger Report |
+| 5:00 AM | Mon – Sat | 🚀 Rocket Scanner Report |
+| 9:30 AM | Mon – Fri | ⚡ Intraday Breakout Report |
+
+All emails are sent to everyone listed in `email_recipients.txt`.
 
 ---
 
@@ -36,9 +50,12 @@ All reports are auto-generated every **weekday at 5:00 AM IST** and available vi
 DailyMomentumStockBreakout/
 │
 ├── rsi_mtf_report_nse.py          # NSE RSI Multi-Timeframe Report (main script)
-├── rsi_mtf_report_bse2.py         # BSE RSI Multi-Timeframe Report
-├── momentum_breakout_scanner.py   # NSE Momentum Breakout Scanner
-├── generate_summary.py            # Generates email_summary.html from the full report
+├── ath_report.py                  # ATH Breakout scanner — stocks at or near all-time highs
+├── multibagger_report.py          # Multibagger scanner — long-term compounders
+├── rocket_scanner.py              # Rocket Scanner — explosive momentum breakouts
+├── intraday_report.py             # Intraday Breakout scanner — PDH/VWAP/ORH (runs at 9:30 AM IST)
+├── momentum_breakout_scanner.py   # Multi-indicator momentum scorer (Excel output)
+├── generate_summary.py            # Builds email_summary.html from full RSI report
 ├── send_report_email.py           # Bulk emailer — BCC batches or individual sends
 ├── email_recipients.txt           # Mailing list — one address per line
 ├── main.py                        # Flask web dashboard (Replit hosting)
@@ -47,16 +64,17 @@ DailyMomentumStockBreakout/
 ├── india/                         # Local stock universe data (tracked in git)
 │   └── NSE/
 │       ├── NSECash/
-│       │   └── EQUITY_L.csv               # NSE EQ-series master list (~2,138 stocks)
+│       │   └── EQUITY_L.csv               # NSE EQ-series master list (~2,360 stocks)
 │       ├── NSESME/
-│       │   └── MW-SME-05-May-2026.csv     # NSE SME stocks (ST + SM series)
+│       │   └── MW-SME-*.csv               # NSE SME stocks (ST + SM series)
 │       └── NIFTY_Indices_Master.xlsx      # Nifty index constituents + sector/industry map
 │
 ├── charts/                        # Generated PNG charts (served via GitHub raw URLs)
 │
 └── .github/
     └── workflows/
-        └── generate-report.yml    # GitHub Actions — auto-generate, deploy & email report
+        ├── generate-report.yml    # Morning reports — runs Mon–Sat at 5:00 AM IST
+        └── intraday-report.yml    # Intraday report — runs Mon–Fri at 9:30 AM IST
 ```
 
 ---
@@ -86,61 +104,80 @@ Scans the full NSE EQ + SME universe across **Daily / Weekly / Monthly** timefra
 - Explosive breakout scoring (volume surge + BB breakout + MACD acceleration)
 - Fibonacci extension targets (127.2% and 161.8%)
 - Ranking vs Nifty50 (percentile)
-- Ranking vs all NSE stocks (universe percentile)
 - 52-week high/low % distance
 
-**Outputs:**
-- `rsi_mtf_report_NSE_YYYYMMDD_HHMM.html` — interactive sortable/filterable report
-- `charts/TICKER.png` — per-stock HD charts (loaded from GitHub raw URLs, no browser hang)
-- `error_log_YYYYMMDD_HHMM.txt` — exception log per ticker
-
-**Key config (top of script):**
-```python
-DATA_PERIOD      = "max"     # full history for true ATH
-MIN_CANDLES      = 1         # include all stocks
-MAX_CHART_STOCKS = 0         # 0 = charts for all stocks
-CHART_DPI        = 120       # chart image resolution
-CHART_BARS       = 90        # bars shown per chart
-RSI_P            = 14
-RSI_SMA_P        = 34
-SCORE_STRONG_BUY = 16
-SCORE_BUY        = 12
-SCORE_WATCH      = 8
-GITHUB_CHARTS_BASE = "https://raw.githubusercontent.com/dipenshah2006/DailyMomentumStockBreakout/main/charts"
-```
+**Output:** `rsi_mtf_report_NSE.html` → deployed to GitHub Pages as `index.html`
 
 ---
 
-### 2. `generate_summary.py` — Daily Email Summary Generator
+### 2. `ath_report.py` — ATH Breakout Report
 
-Reads the full HTML report, extracts the `STOCKS` JSON, and builds a rich
-`email_summary.html` containing **all** qualifying stocks and sectors.
+Scans all 2,360 NSE EQ stocks and identifies those at or near their **all-time highs**.
 
-**Report sections:**
-| Section | Contents |
-|---------|----------|
-| Market Summary | Scanned · Uptrend · Strong Buy · Buy · Watch · Fresh · Explosive |
-| 🔥 Fresh Daily Breakouts | New Strong Buy crossovers today |
-| 🚀 Strong Buy Table | **All** stocks with score ≥ 16 (no cap) |
-| ✅ Buy Table | **All** stocks with score 12–15 (no cap) |
-| 💥 Explosive Breakouts | Volume surge + BB breakout + MFI setups |
-| 🗂️ Sector Breakdown | **All** sectors via NIFTY Indices Master (no cap) |
+**Columns:**
+| Column | Description |
+|--------|-------------|
+| ATH Status | 🏆 AT ATH badge or proximity category |
+| % vs ATH | Exact % above (green) or below (red) the all-time high |
+| ATH Price / Date | Price and date the ATH was made |
+| ↑ 52W Low | % the stock has risen from its 52-week low |
+| ↑ ATH from Low | % the ATH price is above the all-time historical low |
+| RSI D / W / M | Multi-timeframe RSI |
+| Vol Ratio | Today's volume vs 20-day average |
+| Phase | 📈 UPTREND / ➡️ SIDEWAYS / 📉 BEARISH |
 
-> The email contains no "View Full Report" or "Workflow Logs" links —
-> it is a fully self-contained report readable in any email client.
+**Filters:** 🏆 AT ATH · ✅ <5% · 🟡 <10% · 🟠 <20% · 📉 >20% · Phase buttons · Search
+
+**Output:** `ath_report_NSE.html` → deployed as `ath.html`
 
 ---
 
-### 3. `send_report_email.py` — Bulk Emailer
+### 3. `multibagger_report.py` — Multibagger Report
 
-Sends the daily email to any number of subscribers using Gmail SMTP.
-Designed to handle **1,000+ recipients** without hitting YAML or SMTP limits.
+Scans for long-term compounders — stocks with consistent revenue/price growth over 3–5 years.
+
+**Output:** `multibagger_report.html` → deployed as `multibagger.html`
+
+---
+
+### 4. `rocket_scanner.py` — Rocket Scanner
+
+Identifies stocks with explosive momentum: high RSI + volume surge + price breakout alignment.
+
+**Output:** `rocket_scan_latest.html` → deployed as `rocket.html`
+
+---
+
+### 5. `intraday_report.py` — Intraday Breakout Scanner
+
+Runs at **9:30 AM IST** (Mon–Fri). Scans top 500 NSE stocks using live 5-minute bars.
+
+**Signals detected:**
+| Signal | Description |
+|--------|-------------|
+| 🟢 PDH Breakout | Price crossed above previous day's high + 0.2% buffer with volume |
+| 🔵 VWAP Breakout | Price trading above intraday VWAP |
+| 🟡 ORH Breakout | Price broke above opening range high (first 15 min) |
+
+**Score 0–100** — weighted combination of all signals + volume surge + daily RSI trend.
+
+**Columns:** Price · Signals · % vs PDH · PDH ₹ · % vs VWAP · VWAP ₹ · RSI(D) · Vol Ratio · Score
+
+**Filters:** All · PDH Only · VWAP Only · Score ≥ 70 · F&O Only
+
+**Output:** `intraday_report_NSE.html` → emailed at 9:30 AM IST (not hosted on Pages, changes throughout day)
+
+---
+
+### 6. `send_report_email.py` — Bulk Emailer
+
+Sends reports to any number of subscribers using Gmail SMTP.
 
 **Two delivery modes:**
 
 | Mode | Behaviour | Best for |
 |------|-----------|----------|
-| `bcc` (default) | Groups into batches of `EMAIL_BCC_BATCH` (default 100) per SMTP call | Large lists — fast |
+| `bcc` (default) | Batches of `EMAIL_BCC_BATCH` (default 100) per SMTP call | Large lists — fast |
 | `individual` | One SMTP call per recipient, 0.3 s delay | Personalised delivery |
 
 **Environment variables:**
@@ -149,21 +186,16 @@ Designed to handle **1,000+ recipients** without hitting YAML or SMTP limits.
 |----------|----------|-------------|
 | `GMAIL_USERNAME` | ✅ | Sender Gmail address |
 | `GMAIL_APP_PASSWORD` | ✅ | Gmail App Password (16-char, not login password) |
+| `EMAIL_BODY_FILE` | optional | HTML file to send (default: `email_summary.html`) |
+| `EMAIL_SUBJECT_FILE` | optional | File containing subject line |
 | `EMAIL_SEND_MODE` | optional | `bcc` or `individual` (default: `bcc`) |
 | `EMAIL_BCC_BATCH` | optional | Recipients per BCC batch (default: `100`) |
 | `EMAIL_RECIPIENTS` | optional | Comma-separated override — skips `email_recipients.txt` |
 | `EMAIL_DRY_RUN` | optional | `1` = print recipients, do NOT send |
-| `EMAIL_FAILURE_MODE` | optional | `1` = send failure notice instead of report |
-
-**Run directly (local/Replit test):**
-```bash
-GMAIL_USERNAME="you@gmail.com" GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx" \
-  python send_report_email.py
-```
 
 ---
 
-### 4. `email_recipients.txt` — Mailing List
+### 7. `email_recipients.txt` — Mailing List
 
 One email address per line. Lines starting with `#` and blank lines are ignored.
 
@@ -177,54 +209,64 @@ tradewithtrenddirection@gmail.com
 **To manage subscribers:**
 - **Add** → append a line
 - **Remove** → delete the line
-- **Pause** → prefix the line with `#`
+- **Pause** → prefix with `#`
 - **One-off override** → use the `email_list` input when triggering manually from GitHub Actions
 
 ---
 
-### 5. `momentum_breakout_scanner.py` — Momentum Breakout Scanner
+## 🌐 Setup — GitHub Actions (Automated Reports + Email)
 
-Scores every NSE EQ stock out of **26 points** using multi-indicator momentum alignment.
+### Step 1 — Enable GitHub Pages
 
-**Scoring matrix (max 26 pts):**
-| Signal | Points |
-|--------|--------|
-| MACD bullish crossover (Daily) | up to 4 |
-| MACD bullish crossover (Weekly) | up to 4 |
-| MACD bullish crossover (Monthly) | up to 4 |
-| CCI(200) > 0 | 3 |
-| RSI > 50 | 3 |
-| RSI > 60 | +1 bonus |
-| DMI+/DMI− bullish | 4 |
-| Volume above average | 3 |
+1. Go to **Settings → Pages**
+2. Under **Source**, select **GitHub Actions**
+3. Click **Save**
 
-**Scoring tiers:**
-| Score | Tier | Action |
-|-------|------|--------|
-| ≥ 18 | 🔥 Ultra Momentum | Buy breakout |
-| ≥ 14 | ⚡ High Momentum | Buy dip / retest |
-| ≥ 10 | 👀 Watchlist | Wait for alignment |
+### Step 2 — Add required secret
 
-**Outputs:**
-- Terminal — tiered results with progress bar
-- `breakout_scan_YYYYMMDD_HHMM.xlsx` — 4-sheet Excel report
-- CSV fallback if openpyxl not installed
+Go to **Settings → Secrets and variables → Actions → New repository secret**:
 
----
+| Secret | Value |
+|--------|-------|
+| `GMAIL_APP_PASSWORD` | 16-character Gmail App Password from [Google App Passwords](https://myaccount.google.com/apppasswords) |
 
-## 📂 Local Data Files
+> You must have **2-Step Verification** enabled on your Google account before App Passwords become available.
 
-| File | Path | Contents |
-|------|------|----------|
-| NSE EQ Master | `india/NSE/NSECash/EQUITY_L.csv` | ~2,138 EQ-series stocks |
-| NSE SME List | `india/NSE/NSESME/MW-SME-05-May-2026.csv` | SME (ST + SM series) |
-| NIFTY Indices Master | `india/NSE/NIFTY_Indices_Master.xlsx` | Index constituents + sector/industry map |
+### Step 3 — Add subscribers
 
-**Update EQUITY_L.csv:**
-```
-https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv
-```
-Save to: `india/NSE/NSECash/EQUITY_L.csv`
+Edit `email_recipients.txt` — add one address per line, commit and push.
+
+### Step 4 — Verify
+
+1. Go to **Actions → Generate NSE RSI Report**
+2. Click **Run workflow**
+3. Check the email send steps in the logs
+
+### Workflow triggers
+
+**Morning workflow (`generate-report.yml`) — Mon–Sat 5:00 AM IST:**
+
+| Trigger | When |
+|---------|------|
+| 📅 Schedule | Every Mon–Sat at **5:00 AM IST** (11:30 PM UTC) |
+| 📂 CSV update | Whenever `india/NSE/**` files are pushed |
+| 🖱️ Manual | Actions tab → Run workflow |
+
+**Intraday workflow (`intraday-report.yml`) — Mon–Fri 9:30 AM IST:**
+
+| Trigger | When |
+|---------|------|
+| 📅 Schedule | Every Mon–Fri at **9:30 AM IST** (4:00 AM UTC) |
+| 🖱️ Manual | Actions tab → Run workflow |
+
+### Manual workflow inputs (morning workflow)
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `max_chart_stocks` | `50` | `0` = generate charts for all stocks |
+| `email_list` | — | Override recipients for this run only |
+| `send_mode` | `bcc` | `bcc` or `individual` |
+| `dry_run` | `false` | `true` = print recipients, skip actual send |
 
 ---
 
@@ -235,11 +277,20 @@ git clone https://github.com/dipenshah2006/DailyMomentumStockBreakout.git
 cd DailyMomentumStockBreakout
 pip install -r requirements.txt
 
-# Run full NSE report (best after 3:35 PM IST on trading days)
+# Run full NSE RSI report (best after 3:35 PM IST on trading days)
 python rsi_mtf_report_nse.py
 
-# Run momentum scanner
-python momentum_breakout_scanner.py
+# Run ATH Breakout report
+python ath_report.py
+
+# Run Multibagger report
+python multibagger_report.py
+
+# Run Rocket Scanner
+python rocket_scanner.py
+
+# Run Intraday scanner (during market hours: 9:15 AM – 3:30 PM IST)
+python intraday_report.py
 
 # Test email delivery
 GMAIL_USERNAME="you@gmail.com" GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx" \
@@ -248,132 +299,31 @@ GMAIL_USERNAME="you@gmail.com" GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx" \
 
 ---
 
-## 🌐 Setup — GitHub Actions (Automated Daily Report + Email)
-
-The report is automatically generated every **weekday at 5:00 AM IST**, deployed to
-GitHub Pages, and emailed to all addresses in `email_recipients.txt`.
-
-### Step 1 — Enable GitHub Pages
-
-1. Go to **Settings → Pages**
-2. Under **Source**, select **GitHub Actions**
-3. Click **Save**
-
-### Step 2 — Add required secrets
-
-Go to **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Secret | Value |
-|--------|-------|
-| `GMAIL_APP_PASSWORD` | 16-character Gmail App Password from [Google App Passwords](https://myaccount.google.com/apppasswords) |
-| `REPORT_EMAIL_LIST` | *(optional)* Extra comma-separated BCC recipients (in addition to `email_recipients.txt`) |
-
-### Step 3 — Add subscribers
-
-Edit `email_recipients.txt` — add one address per line, commit and push.
-
-### Step 4 — Verify
-
-1. Go to **Actions → Generate NSE RSI Report**
-2. Click **Run workflow**
-3. Check the `Send daily summary email` step logs
-
-### Workflow triggers
-
-| Trigger | When |
-|---------|------|
-| 📅 Schedule | Every Mon–Fri at **5:00 AM IST** (11:30 PM UTC) |
-| 📂 CSV update | Whenever `india/NSE/**` files are pushed |
-| 🖱️ Manual | Actions tab → Run workflow |
-
-### Manual workflow inputs
-
-| Input | Default | Description |
-|-------|---------|-------------|
-| `max_chart_stocks` | `50` | `0` = generate charts for all stocks |
-| `email_list` | — | Override recipients for this run only (comma-separated) |
-| `send_mode` | `bcc` | `bcc` or `individual` |
-| `dry_run` | `false` | `true` = print recipients, skip actual send |
-
----
-
 ## 🚀 Setup — Replit (Web Dashboard)
 
-The project runs as a Flask web app with:
-- Auto-generation on startup (if no report found)
-- Daily 5:00 AM IST scheduled run via APScheduler
-- Direct HTML report served on the homepage
+The project runs as a Flask web app at `https://daily-momentum-stock-breakout--dipenshaah.replit.app/`
 
 **Required Replit secrets:**
 
 | Secret | Purpose |
 |--------|---------|
-| `GMAIL_APP_PASSWORD` | Email delivery from `send_report_email.py` |
-| `GITHUB_PAT` | Push commits to GitHub (if needed) |
+| `GMAIL_APP_PASSWORD` | Email delivery |
+| `GITHUB_TOKEN` | Push commits to GitHub |
 
 ```bash
 pip install flask apscheduler pytz
 python main.py
-# Open http://localhost:5000
 ```
 
----
+**Routes:**
 
-## 📊 Report Features
-
-The generated HTML report includes:
-
-- **Filters:** Phase · Cap size · Sector · Index · Signal · ATH distance · F&O
-- **Sorting:** RSI, Score, Donchian, ATH%, 52W%, Market Cap (multi-column with Shift+click)
-- **ATH tags:** 🏆 At ATH · Within 5% / 10% / 20% · >20% below
-- **Explosive score:** Volume surge + Bollinger Band breakout + MACD + MFI composite
-- **Fibonacci targets:** 127.2% and 161.8% extension levels
-- **Nifty50 badge:** Highlights index constituents
-- **SME badge:** Highlights SME-listed stocks
-- **Lazy-loaded charts:** PNG charts fetched from GitHub raw URLs on card expand
-- **Search:** Live search by ticker or company name
-- **Pagination:** 100 rows/page in table · 50 cards per load
-
----
-
-## 🔧 Configuration Reference
-
-### `rsi_mtf_report_nse.py`
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATA_PERIOD` | `"max"` | yfinance history period |
-| `MIN_CANDLES` | `1` | Min candles to include stock |
-| `MAX_CHART_STOCKS` | `0` | 0 = charts for all stocks |
-| `CHART_DPI` | `120` | Chart image resolution |
-| `CHART_BARS` | `90` | Bars shown per chart |
-| `RSI_P` | `14` | RSI period |
-| `RSI_SMA_P` | `34` | RSI smoothing SMA period |
-| `CCI_P` | `20` | CCI period |
-| `BATCH_SIZE` | `25` | Stocks per download batch |
-| `BATCH_PAUSE` | `1.0` | Seconds between batches |
-| `PAGE_TBL` | `100` | Table rows per page |
-| `PAGE_CARDS` | `50` | Cards per Load More |
-| `GITHUB_CHARTS_BASE` | GitHub raw URL | Base URL for chart images in HTML report |
-
-### `send_report_email.py`
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EMAIL_SEND_MODE` | `bcc` | `bcc` or `individual` |
-| `EMAIL_BCC_BATCH` | `100` | Recipients per BCC batch |
-| `EMAIL_DRY_RUN` | `0` | `1` = simulate without sending |
-
-### `momentum_breakout_scanner.py`
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATA_PERIOD` | `"2y"` | yfinance history period |
-| `MIN_CANDLES` | `220` | Min trading days required |
-| `TIER1_SCORE` | `18` | Ultra momentum threshold |
-| `TIER2_SCORE` | `14` | High momentum threshold |
-| `TIER3_SCORE` | `10` | Watchlist threshold |
-| `BATCH_SIZE` | `25` | Stocks per download batch |
+| Route | Report |
+|-------|--------|
+| `/` | 📈 RSI MTF Report |
+| `/ath` | 🏆 ATH Breakout |
+| `/multibagger` | 💎 Multibagger |
+| `/rocket` | 🚀 Rocket Scanner |
+| `/intraday` | ⚡ Intraday Breakout |
 
 ---
 
@@ -396,8 +346,9 @@ pytz           # IST timezone handling
 ## ⚠️ Notes
 
 - **Best run time:** After **3:35 PM IST** on trading days for final closed candles
+- **Intraday scanner:** Run during market hours (9:15 AM – 3:30 PM IST) for live data
 - **NSE data:** yfinance uses Yahoo Finance (`.NS` suffix) — no NSE API key needed
-- **Rate limiting:** Scripts batch downloads with 1-second pauses to avoid blocks
-- **Caching:** `rsi_mtf_report_nse.py` caches OHLCV data to `stock_data_cache.pkl` to speed up reruns
-- **GitHub Actions runtime:** Full 2,000+ stock run takes ~45–60 min (within the 2-hour cap)
-- **Gmail limits:** Regular Gmail ≈ 500 emails/day · Google Workspace ≈ 2,000/day · BCC mode with batch=100 keeps SMTP calls minimal
+- **Rate limiting:** Scripts batch downloads with pauses to avoid blocks
+- **Caching:** `rsi_mtf_report_nse.py` caches OHLCV data to `stock_data_cache.pkl` for faster reruns
+- **GitHub Actions runtime:** Full 2,000+ stock morning run takes ~45–60 min (within 2-hour cap)
+- **Gmail limits:** Regular Gmail ≈ 500 emails/day · Google Workspace ≈ 2,000/day · BCC batch=100 minimises SMTP calls
