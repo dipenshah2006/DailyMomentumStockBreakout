@@ -519,6 +519,18 @@ _ADMIN_CSS = """
   .search-row input:focus { border-color: #38bdf8; }
   .search-row input::placeholder { color: #475569; }
   .no-match { display: none; color: #475569; font-size: 0.88rem; padding: 12px 0; }
+  .run-section { background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+                 padding: 16px 20px; margin-bottom: 20px; display: flex; align-items: center;
+                 justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .run-section .run-info { font-size: 0.85rem; color: #64748b; }
+  .run-section .run-info strong { color: #94a3b8; }
+  .run-btn { background: #38bdf8; color: #0f172a; border: none; border-radius: 24px;
+             padding: 9px 22px; font-size: 0.9rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  .run-btn:hover { background: #7dd3fc; }
+  .run-btn:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+  .run-status { font-size: 0.82rem; color: #64748b; margin-top: 4px; min-height: 18px; }
+  .run-status.running { color: #fbbf24; }
+  .run-status.done { color: #4ade80; }
 """
 
 
@@ -650,6 +662,13 @@ def admin_subscribers():
 <p class="sub-count">{count_label}</p>
 {flash_html}
 {error_html}
+<div class="run-section">
+  <div>
+    <div class="run-info">📊 <strong>NSE Report</strong> — triggers the full scan across all stocks</div>
+    <div class="run-status" id="runStatus"></div>
+  </div>
+  <button class="run-btn" id="runBtn" onclick="adminRun()">▶ Run Report Now</button>
+</div>
 <div class="toolbar">
   <form method="POST" class="add-row" style="margin-bottom:0">
     <input type="hidden" name="action" value="add">
@@ -672,6 +691,60 @@ def admin_subscribers():
   <input type="hidden" name="action" value="logout">
   <button class="del" type="submit">Log out</button>
 </form>
+<script>
+async function adminRun() {{
+  const btn = document.getElementById('runBtn');
+  const st  = document.getElementById('runStatus');
+  btn.disabled = true; btn.textContent = '⏳ Starting…';
+  try {{
+    const r = await fetch('/run', {{method:'POST'}});
+    const d = await r.json();
+    if (d.started) {{
+      st.className = 'run-status running';
+      st.textContent = '⏳ Report is generating (15–60 min)…';
+      btn.textContent = '⏳ Running…';
+      pollRun();
+    }} else {{
+      st.className = 'run-status running';
+      st.textContent = d.message || 'Already running…';
+      btn.textContent = '⏳ Running…';
+      pollRun();
+    }}
+  }} catch(e) {{
+    st.className = 'run-status'; st.textContent = 'Error — check server logs.';
+    btn.disabled = false; btn.textContent = '▶ Run Report Now';
+  }}
+}}
+async function pollRun() {{
+  try {{
+    const r = await fetch('/status');
+    const d = await r.json();
+    if (!d.running) {{
+      const btn = document.getElementById('runBtn');
+      const st  = document.getElementById('runStatus');
+      btn.disabled = false; btn.textContent = '▶ Run Report Now';
+      st.className = 'run-status done';
+      st.textContent = d.latest_report ? '✅ Report ready — ' + (d.report_generated_at || '') : '✅ Done.';
+      return;
+    }}
+  }} catch(e) {{}}
+  setTimeout(pollRun, 8000);
+}}
+(async () => {{
+  try {{
+    const r = await fetch('/status');
+    const d = await r.json();
+    if (d.running) {{
+      const btn = document.getElementById('runBtn');
+      const st  = document.getElementById('runStatus');
+      btn.disabled = true; btn.textContent = '⏳ Running…';
+      st.className = 'run-status running';
+      st.textContent = '⏳ Report is generating…';
+      pollRun();
+    }}
+  }} catch(e) {{}}
+}})();
+</script>
 </body></html>"""
     return Response(html, mimetype='text/html')
 
