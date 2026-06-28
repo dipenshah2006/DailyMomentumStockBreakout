@@ -1,0 +1,5 @@
+# NSE Report mailing list — one email address per line
+# Lines starting with # are comments and are ignored
+# Blank lines are also ignored
+dipenshah2006@gmail.com
+tradewithtrenddirection@gmail.com

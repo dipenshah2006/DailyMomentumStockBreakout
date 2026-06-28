@@ -1,0 +1,270 @@
+name: Generate NSE RSI Report
+
+on:
+  push:
+    paths:
+      - 'india/NSE/**'           # triggers when CSV files are updated
+  schedule:
+    - cron: '30 23 * * 0-4'     # 5:00 AM IST (Mon–Fri) = 11:30 PM UTC Sun–Thu
+  workflow_dispatch:             # manual trigger from GitHub UI
+    inputs:
+      max_chart_stocks:
+        description: 'Max stocks to chart (0=all, 50=faster)'
+        required: false
+        default: '50'
+      email_list:
+        description: 'Override recipients — comma-separated (replaces email_recipients.txt for this run)'
+        required: false
+        default: ''
+      send_mode:
+        description: 'Email send mode'
+        required: false
+        default: 'bcc'
+        type: choice
+        options:
+          - bcc
+          - individual
+      dry_run:
+        description: 'Dry run — print recipients, do NOT send'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # opt-in before June 16 2026 forced migration
+
+jobs:
+  generate-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" \
+            "pandas>=2.0.0" \
+            "numpy>=1.24.0" \
+            "matplotlib>=3.7.0" \
+            "requests>=2.31.0" \
+            "openpyxl>=3.1.0"
+
+      # ── 4. Restore stock data cache ────────────────────────────────────────
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-${{ runner.os }}-${{ hashFiles('rsi_mtf_report_nse.py') }}
+          restore-keys: |
+            stock-cache-${{ runner.os }}-
+
+      # ── 5. Restore chart PNG cache ─────────────────────────────────────────
+      - name: Restore chart cache
+        uses: actions/cache@v4
+        with:
+          path: charts/
+          key: chart-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            chart-cache-${{ runner.os }}-
+
+      # ── 6. Create required directories ─────────────────────────────────────
+      - name: Create directories
+        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts
+
+      # ── 7. Download NSE equity list (graceful on WAF block) ────────────────
+      - name: Download NSE equity list
+        run: |
+          curl -sL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Referer: https://www.nseindia.com/" \
+            --retry 3 --retry-delay 5 --max-time 30 \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
+          || echo "⚠️  NSE CSV blocked — script will use built-in ticker list"
+
+      # ── 8. Run the report ──────────────────────────────────────────────────
+      - name: Generate NSE RSI MTF Report
+        id: generate_report
+        env:
+          MAX_CHART_STOCKS_OVERRIDE: ${{ github.event.inputs.max_chart_stocks || '50' }}
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python rsi_mtf_report_nse.py
+
+      # ── 8b. Run Rocket Scanner ─────────────────────────────────────────────
+      - name: Run Rocket Scanner
+        id: rocket_scanner
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python rocket_scanner.py || echo "⚠️  Rocket scanner failed — continuing"
+
+      # ── 9. Verify & prepare GitHub Pages ──────────────────────────────────
+      - name: Prepare GitHub Pages output
+        run: |
+          mkdir -p _site
+
+          if [ -f "rsi_mtf_report_NSE.html" ]; then
+            cp rsi_mtf_report_NSE.html _site/index.html
+            echo "✅ Report copied: $(du -sh rsi_mtf_report_NSE.html | cut -f1)"
+          else
+            latest=$(ls -t rsi_mtf_report_*.html 2>/dev/null | head -1)
+            if [ -n "$latest" ]; then
+              cp "$latest" _site/index.html
+              echo "✅ Report copied: $latest"
+            else
+              echo "❌ No report HTML found!"
+              exit 1
+            fi
+          fi
+
+          if [ -d "charts" ] && ls charts/*.png &>/dev/null; then
+            cp -r charts/ _site/charts/
+            echo "✅ Charts: $(ls charts/*.png | wc -l) files"
+          fi
+
+          if [ -f "rocket_scan_latest.html" ]; then
+            cp rocket_scan_latest.html _site/rocket.html
+            echo "✅ Rocket scan copied"
+          fi
+
+          if [ -f "ath_report_NSE.html" ]; then
+            cp ath_report_NSE.html _site/ath.html
+            echo "✅ ATH report copied"
+          fi
+
+          if [ -f "multibagger_report.html" ]; then
+            cp multibagger_report.html _site/multibagger.html
+            echo "✅ Multibagger report copied: $(du -sh multibagger_report.html | cut -f1)"
+          else
+            echo "⚠️  multibagger_report.html not found — skipping"
+          fi
+
+          ls error_log_*.txt &>/dev/null && cp error_log_*.txt _site/ || true
+
+      # ── 10. Upload HTML as artifact (always, for debugging) ────────────────
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-report-run-${{ github.run_number }}
+          path: |
+            rsi_mtf_report_NSE.html
+            error_log_*.txt
+          retention-days: 14
+
+      # ── 11. Upload Pages artifact ──────────────────────────────────────────
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      # ── 12. Deploy to GitHub Pages ─────────────────────────────────────────
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # ── 13. Refresh NIFTY Indices Master (sector/industry map) ────────────
+      - name: Refresh NIFTY Indices Master
+        if: steps.generate_report.outcome == 'success'
+        run: |
+          python refresh_nifty_master.py \
+            && echo "✅ NIFTY master refreshed" \
+            || echo "⚠️  NIFTY master refresh failed — using existing XLSX (sector data may be stale)"
+
+      # ── 14. Generate daily email summary HTML ──────────────────────────────
+      - name: Generate email summary
+        if: steps.generate_report.outcome == 'success'
+        env:
+          PAGES_URL: ${{ steps.deployment.outputs.page_url }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: python generate_summary.py
+
+      # ── 15. Read email subject into env ────────────────────────────────────
+      - name: Set email subject
+        if: steps.generate_report.outcome == 'success'
+        id: email_meta
+        run: |
+          if [ -f email_subject.txt ]; then
+            echo "subject=$(cat email_subject.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "subject=📈 NSE Breakout Report — Run #${{ github.run_number }}" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 15. Send daily summary email ───────────────────────────────────────
+      - name: Send daily summary email
+        if: steps.generate_report.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS:   ${{ github.event.inputs.email_list }}
+          EMAIL_SEND_MODE:    ${{ github.event.inputs.send_mode || 'bcc' }}
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+        run: python send_report_email.py
+
+      # ── 15b. Send Rocket Scanner email ────────────────────────────────────
+      - name: Send Rocket Scanner email
+        if: steps.generate_report.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS:   ${{ github.event.inputs.email_list }}
+          EMAIL_SEND_MODE:    ${{ github.event.inputs.send_mode || 'bcc' }}
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    rocket_scan_latest.html
+          EMAIL_SUBJECT_FILE: rocket_subject.txt
+        run: |
+          if [ ! -f rocket_scan_latest.html ]; then
+            echo "⚠️  rocket_scan_latest.html not found — skipping rocket email"
+            exit 0
+          fi
+          DATE=$(date +'%d %b %Y')
+          echo "🚀 NSE Rocket Scanner — Breakout Candidates ${DATE}" > rocket_subject.txt
+          python send_report_email.py
+
+      # ── 16. Send failure email ─────────────────────────────────────────────
+      - name: Send failure email
+        if: steps.generate_report.outcome == 'failure'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS:   ${{ github.event.inputs.email_list }}
+          EMAIL_SEND_MODE:    ${{ github.event.inputs.send_mode || 'bcc' }}
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_FAILURE_MODE: '1'
+          GITHUB_RUN_ID:      ${{ github.run_id }}
+          GITHUB_RUN_NUMBER:  ${{ github.run_number }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+        run: python send_report_email.py
