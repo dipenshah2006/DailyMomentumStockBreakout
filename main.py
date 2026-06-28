@@ -489,6 +489,15 @@ _ADMIN_CSS = """
   .login-card button:hover { background: #7dd3fc; }
   .err-msg { color: #f87171; font-size: 0.85rem; margin-top: -8px; margin-bottom: 8px; }
   .flash { color: #4ade80; font-size: 0.85rem; margin-bottom: 16px; }
+  .err-inline { color: #f87171; font-size: 0.85rem; margin-bottom: 16px; }
+  .add-row { display: flex; gap: 8px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
+  .add-row input[type=email] { flex: 1; min-width: 220px; background: #0f172a; border: 1px solid #475569;
+    border-radius: 24px; padding: 9px 18px; color: #e2e8f0; font-size: 0.9rem; outline: none; }
+  .add-row input[type=email]:focus { border-color: #38bdf8; }
+  .add-row input[type=email]::placeholder { color: #475569; }
+  .add-btn { background: #38bdf8; color: #0f172a; border: none; border-radius: 24px;
+             padding: 9px 22px; font-size: 0.9rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  .add-btn:hover { background: #7dd3fc; }
 """
 
 
@@ -509,6 +518,16 @@ def admin_subscribers():
                 error = 'Incorrect password.'
         elif action == 'logout':
             session.clear()
+        elif action == 'add' and _check_admin():
+            email = request.form.get('email', '').strip().lower()
+            if not email or not EMAIL_RE.match(email):
+                error = 'Please enter a valid email address.'
+            elif email in _read_recipients():
+                error = f'{email} is already on the list.'
+            else:
+                _append_recipient(email)
+                _push_to_github(f'admin: add {email}')
+                flash = f'Added {email}'
         elif action == 'delete' and _check_admin():
             email = request.form.get('email', '').strip().lower()
             if email:
@@ -550,6 +569,12 @@ def admin_subscribers():
 <h1>📋 Subscribers</h1>
 <p class="sub-count">{len(recipients)} address{'es' if len(recipients) != 1 else ''} on the mailing list</p>
 {'<p class="flash">✅ ' + flash + '</p>' if flash else ''}
+{'<p class="err-inline">⚠️ ' + error + '</p>' if error else ''}
+<form method="POST" class="add-row">
+  <input type="hidden" name="action" value="add">
+  <input type="email" name="email" placeholder="Add email address…" autocomplete="off">
+  <button class="add-btn" type="submit">+ Add</button>
+</form>
 {'<table><thead><tr><th>#</th><th>Email</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' if recipients else '<p class="empty">No subscribers yet.</p>'}
 <form method="POST" style="margin-top:32px">
   <input type="hidden" name="action" value="logout">
