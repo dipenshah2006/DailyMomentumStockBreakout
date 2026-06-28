@@ -31,8 +31,10 @@ IST_OFFSET     = "+05:30"
 WATCHLIST = {
     "NCC":              "NCC.NS",
     "Mankind Pharma":   "MANKIND.NS",
-    "MTAR Technology":  "MTAR.NS",
-    "Bhagyanagar India":"BHIN.NS",
+    "Dixon Technologies":"DIXON.NS",
+    "Polycab India":    "POLYCAB.NS",
+    "Astral":           "ASTRAL.NS",
+    "Tube Investments": "TIINDIA.NS",
 }
 
 # Strategy thresholds
@@ -881,7 +883,7 @@ function filterTable(){{
     if(nextId){{document.getElementById(nextId).style.display='none';}}
     if(match)shown++;
   }});
-  document.getElementById('countInfo').textContent=`Showing ${shown} of {n_total}`;
+  document.getElementById('countInfo').textContent=`Showing ${{shown}} of {n_total}`;
 }}
 function sortBy(field){{
   const rows=[...document.querySelectorAll('#tableBody tr[data-name]')];
