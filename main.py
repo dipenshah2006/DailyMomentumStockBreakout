@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 import subprocess
 import sys
 import threading
@@ -22,6 +23,54 @@ IST = pytz.timezone('Asia/Kolkata')
 job_lock = threading.Lock()
 job_running = False
 job_started_at = None
+
+RECIPIENTS_FILE = 'email_recipients.txt'
+EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
+
+
+def _read_recipients():
+    if not os.path.exists(RECIPIENTS_FILE):
+        return []
+    with open(RECIPIENTS_FILE, 'r', encoding='utf-8') as f:
+        lines = f.read().splitlines()
+    return [ln.strip().lower() for ln in lines
+            if ln.strip() and not ln.strip().startswith('#')]
+
+
+def _append_recipient(email):
+    with open(RECIPIENTS_FILE, 'a', encoding='utf-8') as f:
+        f.write(email + '\n')
+
+
+def _remove_recipient(email):
+    if not os.path.exists(RECIPIENTS_FILE):
+        return
+    with open(RECIPIENTS_FILE, 'r', encoding='utf-8') as f:
+        lines = f.read().splitlines()
+    kept = [ln for ln in lines if ln.strip().lower() != email.lower()]
+    with open(RECIPIENTS_FILE, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(kept) + ('\n' if kept else ''))
+
+
+def _push_to_github(commit_msg):
+    token = os.environ.get('GITHUB_TOKEN', '')
+    if not token:
+        return False, 'saved locally (set GITHUB_TOKEN to also push to GitHub)'
+    try:
+        env = {**os.environ,
+               'GIT_AUTHOR_NAME': 'NSE Bot', 'GIT_AUTHOR_EMAIL': 'bot@noreply',
+               'GIT_COMMITTER_NAME': 'NSE Bot', 'GIT_COMMITTER_EMAIL': 'bot@noreply'}
+        subprocess.run(['git', 'add', RECIPIENTS_FILE], check=True, env=env)
+        subprocess.run(['git', 'commit', '-m', commit_msg], check=True, env=env)
+        remote = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                                capture_output=True, text=True).stdout.strip()
+        if remote.startswith('https://') and '@' not in remote:
+            remote = remote.replace('https://', f'https://x-access-token:{token}@')
+        subprocess.run(['git', 'push', remote, 'HEAD'], check=True, env=env)
+        return True, 'saved and pushed to GitHub'
+    except subprocess.CalledProcessError as e:
+        log.error(f'GitHub push failed: {e}')
+        return False, 'saved locally (GitHub push failed — check GITHUB_TOKEN)'
 
 
 def latest_report():
@@ -88,6 +137,58 @@ _COMMON_CSS = """
                 background: #fbbf24; animation: pulse 1.2s infinite; margin-right: 6px; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
   #msg { margin-top: 12px; font-size: 0.85rem; color: #64748b; min-height: 20px; }
+  .sub-box { background: #1e293b; border: 1px solid #334155; border-radius: 14px;
+             padding: 18px 28px; margin-top: 20px; max-width: 520px; width: 100%; text-align: center; }
+  .sub-box .label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+  .sub-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .sub-row input[type=email] { flex: 1; min-width: 200px; background: #0f172a; border: 1px solid #475569;
+    border-radius: 24px; padding: 9px 18px; color: #e2e8f0; font-size: 0.9rem; outline: none; }
+  .sub-row input[type=email]:focus { border-color: #38bdf8; }
+  .sub-row input[type=email]::placeholder { color: #475569; }
+  #sub-msg { margin-top: 10px; font-size: 0.82rem; min-height: 18px; color: #64748b; }
+  #sub-msg.ok  { color: #4ade80; }
+  #sub-msg.err { color: #f87171; }
+  .unsub-link { margin-top: 8px; font-size: 0.78rem; color: #475569; }
+  .unsub-link a { color: #64748b; text-decoration: underline; cursor: pointer; }
+  .unsub-link a:hover { color: #94a3b8; }
+"""
+
+_SUBSCRIBE_WIDGET = """
+  <div class="sub-box">
+    <div class="label">📬 Get daily reports in your inbox</div>
+    <div class="sub-row">
+      <input type="email" id="subEmail" placeholder="you@example.com" />
+      <button class="btn" style="margin-top:0" onclick="doSubscribe()">Subscribe</button>
+    </div>
+    <div id="sub-msg"></div>
+    <div class="unsub-link"><a onclick="doUnsubscribe()">Unsubscribe</a></div>
+  </div>
+<script>
+async function doSubscribe() {
+  const email = document.getElementById('subEmail').value.trim();
+  const msg = document.getElementById('sub-msg');
+  if (!email) { msg.className='err'; msg.textContent='Please enter your email.'; return; }
+  msg.className=''; msg.textContent='Saving…';
+  try {
+    const r = await fetch('/subscribe', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+    const d = await r.json();
+    msg.className = d.ok ? 'ok' : 'err';
+    msg.textContent = d.message;
+  } catch(e) { msg.className='err'; msg.textContent='Error — try again.'; }
+}
+async function doUnsubscribe() {
+  const email = document.getElementById('subEmail').value.trim();
+  const msg = document.getElementById('sub-msg');
+  if (!email) { msg.className='err'; msg.textContent='Enter your email to unsubscribe.'; return; }
+  msg.className=''; msg.textContent='Removing…';
+  try {
+    const r = await fetch('/unsubscribe', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+    const d = await r.json();
+    msg.className = d.ok ? 'ok' : 'err';
+    msg.textContent = d.message;
+  } catch(e) { msg.className='err'; msg.textContent='Error — try again.'; }
+}
+</script>
 """
 
 WAITING_HTML = f"""<!DOCTYPE html>
@@ -115,6 +216,8 @@ WAITING_HTML = f"""<!DOCTYPE html>
     <a class="btn outline" href="/ath">🏆 ATH Breakout</a>
     <a class="btn outline" href="/rocket">🚀 Rocket Scanner</a>
   </div>
+
+  {_SUBSCRIBE_WIDGET}
 
 <script>
 async function triggerRun() {{
@@ -177,6 +280,8 @@ RUNNING_HTML = f"""<!DOCTYPE html>
     <a class="btn outline" href="/ath">🏆 ATH Breakout</a>
     <a class="btn outline" href="/rocket">🚀 Rocket Scanner</a>
   </div>
+
+  {_SUBSCRIBE_WIDGET}
 
 <script>
 const startTime = Date.now();
@@ -309,6 +414,36 @@ def intraday():
         )
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/subscribe', methods=['POST'])
+def subscribe():
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    if not email or not EMAIL_RE.match(email):
+        return jsonify({'ok': False, 'message': 'Please enter a valid email address.'})
+    existing = _read_recipients()
+    if email in existing:
+        return jsonify({'ok': True, 'message': '✅ Already subscribed — you\'re on the list!'})
+    _append_recipient(email)
+    pushed, detail = _push_to_github(f'subscribe: add {email}')
+    log.info(f'New subscriber: {email} — {detail}')
+    return jsonify({'ok': True, 'message': f'✅ Subscribed! Daily reports will arrive in your inbox ({detail}).'})
+
+
+@app.route('/unsubscribe', methods=['POST'])
+def unsubscribe():
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    if not email or not EMAIL_RE.match(email):
+        return jsonify({'ok': False, 'message': 'Please enter a valid email address.'})
+    existing = _read_recipients()
+    if email not in existing:
+        return jsonify({'ok': False, 'message': 'That email isn\'t on the list.'})
+    _remove_recipient(email)
+    pushed, detail = _push_to_github(f'unsubscribe: remove {email}')
+    log.info(f'Unsubscribed: {email} — {detail}')
+    return jsonify({'ok': True, 'message': f'✅ Unsubscribed — you\'ve been removed from the list.'})
 
 
 @app.route('/charts/<path:filename>')
