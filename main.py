@@ -135,6 +135,8 @@ _COMMON_CSS = """
   .btn:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
   .btn.outline { background: transparent; border: 1px solid #475569; color: #94a3b8; }
   .btn.outline:hover { border-color: #38bdf8; color: #38bdf8; background: #001d2e; }
+  .badge { display: inline-block; background: #38bdf8; color: #0f172a; border-radius: 20px;
+           font-size: 0.72rem; font-weight: 700; padding: 1px 7px; margin-left: 4px; vertical-align: middle; }
   .nav { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 20px; }
   .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
                 background: #fbbf24; animation: pulse 1.2s infinite; margin-right: 6px; }
@@ -218,12 +220,13 @@ WAITING_HTML = f"""<!DOCTYPE html>
   <div class="nav">
     <a class="btn outline" href="/ath">🏆 ATH Breakout</a>
     <a class="btn outline" href="/rocket">🚀 Rocket Scanner</a>
-    <a class="btn outline" href="/subscribers">⚙️ Admin</a>
+    <a class="btn outline" href="/subscribers">⚙️ Admin <span class="badge" id="adminBadge"></span></a>
   </div>
 
   {_SUBSCRIBE_WIDGET}
 
 <script>
+fetch('/sub-count').then(r=>r.json()).then(d=>{{if(d.count>0)document.getElementById('adminBadge').textContent=d.count;}});
 async function triggerRun() {{
   const btn = document.getElementById('runBtn');
   const msg = document.getElementById('msg');
@@ -283,12 +286,13 @@ RUNNING_HTML = f"""<!DOCTYPE html>
   <div class="nav">
     <a class="btn outline" href="/ath">🏆 ATH Breakout</a>
     <a class="btn outline" href="/rocket">🚀 Rocket Scanner</a>
-    <a class="btn outline" href="/subscribers">⚙️ Admin</a>
+    <a class="btn outline" href="/subscribers">⚙️ Admin <span class="badge" id="adminBadge"></span></a>
   </div>
 
   {_SUBSCRIBE_WIDGET}
 
 <script>
+fetch('/sub-count').then(r=>r.json()).then(d=>{{if(d.count>0)document.getElementById('adminBadge').textContent=d.count;}});
 const startTime = Date.now();
 function updateElapsed() {{
   const s = Math.floor((Date.now() - startTime) / 1000);
@@ -419,6 +423,11 @@ def intraday():
         )
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/sub-count')
+def sub_count():
+    return jsonify({'count': len(_read_recipients())})
 
 
 @app.route('/subscribe', methods=['POST'])
