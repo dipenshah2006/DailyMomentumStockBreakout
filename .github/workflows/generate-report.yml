@@ -121,7 +121,22 @@ jobs:
           PYTHONUNBUFFERED: '1'
         run: python rsi_mtf_report_nse.py
 
-      # ── 8b. Run Rocket Scanner ─────────────────────────────────────────────
+      # ── 8b. Run ATH Breakout Report ────────────────────────────────────────
+      - name: Run ATH Breakout Report
+        id: ath_report
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python ath_report.py || echo "⚠️  ATH report failed — continuing"
+
+      # ── 8c. Run Multibagger Report ─────────────────────────────────────────
+      - name: Run Multibagger Report
+        id: multibagger_report
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python multibagger_report.py || echo "⚠️  Multibagger report failed — continuing"
+
+      # ── 8d. Run Rocket Scanner ─────────────────────────────────────────────
       - name: Run Rocket Scanner
         id: rocket_scanner
         env:
