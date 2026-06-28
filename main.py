@@ -513,6 +513,12 @@ _ADMIN_CSS = """
     resize: vertical; min-height: 100px; outline: none; }
   .bulk-section textarea:focus { border-color: #38bdf8; }
   .bulk-hint { font-size: 0.78rem; color: #475569; margin-top: 6px; margin-bottom: 10px; }
+  .search-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .search-row input { flex: 1; max-width: 340px; background: #0f172a; border: 1px solid #475569;
+    border-radius: 24px; padding: 8px 16px; color: #e2e8f0; font-size: 0.88rem; outline: none; }
+  .search-row input:focus { border-color: #38bdf8; }
+  .search-row input::placeholder { color: #475569; }
+  .no-match { display: none; color: #475569; font-size: 0.88rem; padding: 12px 0; }
 """
 
 
@@ -614,14 +620,36 @@ def admin_subscribers():
         f'<button class="del" type="submit">Remove</button></form></td></tr>'
         for i, r in enumerate(recipients)
     )
+    count_label = f"{len(recipients)} address{'es' if len(recipients) != 1 else ''} on the mailing list"
+    flash_html  = f'<p class="flash">✅ {flash}</p>' if flash else ''
+    error_html  = f'<p class="err-inline">⚠️ {error}</p>' if error else ''
+    if recipients:
+        table_html = (
+            '<div class="search-row">'
+            '<input id="srch" type="search" placeholder="🔍  Search subscribers…" oninput="filterTable(this.value)">'
+            '</div>'
+            '<p class="no-match" id="noMatch">No matching subscribers.</p>'
+            '<table><thead><tr><th>#</th><th>Email</th><th></th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>'
+            '<script>'
+            'function filterTable(q){'
+            'const rows=document.querySelectorAll("tbody tr");let vis=0;'
+            'rows.forEach(r=>{'
+            'const show=r.cells[1].textContent.toLowerCase().includes(q.toLowerCase());'
+            'r.style.display=show?"":"none";if(show)vis++;});'
+            'document.getElementById("noMatch").style.display=vis===0&&q?"block":"none";}'
+            '</script>'
+        )
+    else:
+        table_html = '<p class="empty">No subscribers yet.</p>'
     html = f"""<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Subscribers — Admin</title><style>{_ADMIN_CSS}</style></head><body>
 <a class="back" href="/">← Back to dashboard</a>
 <h1>📋 Subscribers</h1>
-<p class="sub-count">{len(recipients)} address{'es' if len(recipients) != 1 else ''} on the mailing list</p>
-{'<p class="flash">✅ ' + flash + '</p>' if flash else ''}
-{'<p class="err-inline">⚠️ ' + error + '</p>' if error else ''}
+<p class="sub-count">{count_label}</p>
+{flash_html}
+{error_html}
 <div class="toolbar">
   <form method="POST" class="add-row" style="margin-bottom:0">
     <input type="hidden" name="action" value="add">
@@ -639,7 +667,7 @@ def admin_subscribers():
     <button class="add-btn" type="submit">Import</button>
   </form>
 </details>
-{'<table><thead><tr><th>#</th><th>Email</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' if recipients else '<p class="empty">No subscribers yet.</p>'}
+{table_html}
 <form method="POST" style="margin-top:32px">
   <input type="hidden" name="action" value="logout">
   <button class="del" type="submit">Log out</button>
