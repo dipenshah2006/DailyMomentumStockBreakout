@@ -27,6 +27,11 @@ job_lock = threading.Lock()
 job_running = False
 job_started_at = None
 
+email_lock = threading.Lock()
+email_running = False
+email_started_at = None
+email_last_result = None
+
 RECIPIENTS_FILE = 'email_recipients.txt'
 EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
 
@@ -109,6 +114,39 @@ def run_nse_report():
     finally:
         with job_lock:
             job_running = False
+
+
+def run_email_send():
+    global email_running, email_started_at, email_last_result
+    with email_lock:
+        if email_running:
+            log.info('Email send already running, skipping.')
+            return
+        email_running = True
+        email_started_at = datetime.now(IST)
+        email_last_result = None
+    try:
+        log.info('Starting manual email send…')
+        result = subprocess.run(
+            [sys.executable, 'send_report_email.py'],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode == 0:
+            email_last_result = {'ok': True, 'msg': 'Emails sent successfully.'}
+            log.info('Email send completed successfully.')
+        else:
+            err = (result.stderr or result.stdout or 'Unknown error')[-300:]
+            email_last_result = {'ok': False, 'msg': f'Send failed: {err}'}
+            log.error(f'Email send failed:\n{err}')
+    except subprocess.TimeoutExpired:
+        email_last_result = {'ok': False, 'msg': 'Timed out after 5 minutes.'}
+        log.error('Email send timed out.')
+    except Exception as e:
+        email_last_result = {'ok': False, 'msg': str(e)}
+        log.error(f'Email send error: {e}')
+    finally:
+        with email_lock:
+            email_running = False
 
 
 _COMMON_CSS = """
@@ -430,6 +468,32 @@ def sub_count():
     return jsonify({'count': len(_read_recipients())})
 
 
+@app.route('/send-email', methods=['POST'])
+def send_email_now():
+    if email_running:
+        return jsonify({'started': False, 'message': 'Email send already in progress.'})
+    gmail_user = os.environ.get('GMAIL_USERNAME', '')
+    gmail_pass = os.environ.get('GMAIL_APP_PASSWORD', '')
+    if not gmail_user or not gmail_pass:
+        return jsonify({'started': False, 'message': 'GMAIL_USERNAME or GMAIL_APP_PASSWORD not set.'})
+    t = threading.Thread(target=run_email_send, daemon=True)
+    t.start()
+    log.info('Email send triggered manually via /send-email endpoint.')
+    return jsonify({'started': True, 'message': 'Email send started.'})
+
+
+@app.route('/email-status')
+def email_status():
+    elapsed = None
+    if email_running and email_started_at:
+        elapsed = int((datetime.now(IST) - email_started_at).total_seconds())
+    return jsonify({
+        'running': email_running,
+        'elapsed_seconds': elapsed,
+        'last_result': email_last_result,
+    })
+
+
 @app.route('/subscribe', methods=['POST'])
 def subscribe():
     data = request.get_json(silent=True) or {}
@@ -680,6 +744,13 @@ def admin_subscribers():
   </div>
   <button class="run-btn" id="runBtn" onclick="adminRun()">▶ Run Report Now</button>
 </div>
+<div class="run-section">
+  <div>
+    <div class="run-info">📧 <strong>Send Report Email</strong> — delivers the latest report to all {len(recipients)} subscribers</div>
+    <div class="run-status" id="emailStatus"></div>
+  </div>
+  <button class="run-btn" id="emailBtn" onclick="adminSendEmail()">✉️ Send Email Now</button>
+</div>
 <div class="toolbar">
   <form method="POST" class="add-row" style="margin-bottom:0">
     <input type="hidden" name="action" value="add">
@@ -703,6 +774,60 @@ def admin_subscribers():
   <button class="del" type="submit">Log out</button>
 </form>
 <script>
+async function adminSendEmail() {{
+  const btn = document.getElementById('emailBtn');
+  const st  = document.getElementById('emailStatus');
+  btn.disabled = true; btn.textContent = '⏳ Sending…';
+  st.className = 'run-status running'; st.textContent = '';
+  try {{
+    const r = await fetch('/send-email', {{method:'POST'}});
+    const d = await r.json();
+    if (d.started) {{
+      st.textContent = '⏳ Sending to all subscribers…';
+      pollEmail();
+    }} else {{
+      st.className = 'run-status'; st.textContent = d.message;
+      btn.disabled = false; btn.textContent = '✉️ Send Email Now';
+    }}
+  }} catch(e) {{
+    st.className = 'run-status'; st.textContent = 'Error — check server logs.';
+    btn.disabled = false; btn.textContent = '✉️ Send Email Now';
+  }}
+}}
+async function pollEmail() {{
+  try {{
+    const r = await fetch('/email-status');
+    const d = await r.json();
+    if (!d.running) {{
+      const btn = document.getElementById('emailBtn');
+      const st  = document.getElementById('emailStatus');
+      btn.disabled = false; btn.textContent = '✉️ Send Email Now';
+      if (d.last_result) {{
+        st.className = 'run-status ' + (d.last_result.ok ? 'done' : '');
+        st.textContent = (d.last_result.ok ? '✅ ' : '⚠️ ') + d.last_result.msg;
+      }}
+      return;
+    }}
+  }} catch(e) {{}}
+  setTimeout(pollEmail, 4000);
+}}
+(async () => {{
+  try {{
+    const r = await fetch('/email-status');
+    const d = await r.json();
+    if (d.running) {{
+      const btn = document.getElementById('emailBtn');
+      const st  = document.getElementById('emailStatus');
+      btn.disabled = true; btn.textContent = '⏳ Sending…';
+      st.className = 'run-status running'; st.textContent = '⏳ Send in progress…';
+      pollEmail();
+    }} else if (d.last_result) {{
+      const st = document.getElementById('emailStatus');
+      st.className = 'run-status ' + (d.last_result.ok ? 'done' : '');
+      st.textContent = (d.last_result.ok ? '✅ ' : '⚠️ ') + d.last_result.msg;
+    }}
+  }} catch(e) {{}}
+}})();
 async function adminRun() {{
   const btn = document.getElementById('runBtn');
   const st  = document.getElementById('runStatus');
