@@ -16,16 +16,6 @@ Automated NSE stock analysis toolkit that generates daily HTML reports and email
 | 🚀 Rocket Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/rocket.html |
 | ⚡ Intraday Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/intraday.html |
 
-### 🖥️ Replit Web Dashboard (live preview with Run Now button)
-
-| Report | URL |
-|--------|-----|
-| 📈 RSI Multi-Timeframe Breakout | https://daily-momentum-stock-breakout--dipenshaah.replit.app/ |
-| 🏆 ATH Breakout | https://daily-momentum-stock-breakout--dipenshaah.replit.app/ath |
-| 💎 Multibagger | https://daily-momentum-stock-breakout--dipenshaah.replit.app/multibagger |
-| 🚀 Rocket Scanner | https://daily-momentum-stock-breakout--dipenshaah.replit.app/rocket |
-| ⚡ Intraday Breakout | https://daily-momentum-stock-breakout--dipenshaah.replit.app/intraday |
-
 > **Tip:** GitHub Pages is the fastest way to share reports — no login required, bookmark-friendly, always shows the latest run.
 
 ---
@@ -296,34 +286,6 @@ python intraday_report.py
 GMAIL_USERNAME="you@gmail.com" GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx" \
   python send_report_email.py
 ```
-
----
-
-## 🚀 Setup — Replit (Web Dashboard)
-
-The project runs as a Flask web app at `https://daily-momentum-stock-breakout--dipenshaah.replit.app/`
-
-**Required Replit secrets:**
-
-| Secret | Purpose |
-|--------|---------|
-| `GMAIL_APP_PASSWORD` | Email delivery |
-| `GITHUB_TOKEN` | Push commits to GitHub |
-
-```bash
-pip install flask apscheduler pytz
-python main.py
-```
-
-**Routes:**
-
-| Route | Report |
-|-------|--------|
-| `/` | 📈 RSI MTF Report |
-| `/ath` | 🏆 ATH Breakout |
-| `/multibagger` | 💎 Multibagger |
-| `/rocket` | 🚀 Rocket Scanner |
-| `/intraday` | ⚡ Intraday Breakout |
 
 ---
 
