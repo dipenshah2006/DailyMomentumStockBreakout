@@ -11,7 +11,7 @@ from datetime import datetime
 from functools import wraps
 
 import pytz
-from flask import Flask, send_file, abort, Response, jsonify, request, session
+from flask import Flask, send_file, abort, Response, jsonify, request, session, make_response
 from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -498,7 +498,24 @@ _ADMIN_CSS = """
   .add-btn { background: #38bdf8; color: #0f172a; border: none; border-radius: 24px;
              padding: 9px 22px; font-size: 0.9rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
   .add-btn:hover { background: #7dd3fc; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .export-btn { background: transparent; border: 1px solid #475569; color: #94a3b8; border-radius: 24px;
+                padding: 7px 18px; font-size: 0.85rem; cursor: pointer; text-decoration: none; display: inline-block; }
+  .export-btn:hover { border-color: #38bdf8; color: #38bdf8; }
 """
+
+
+@app.route('/subscribers/export')
+def admin_export():
+    if not _check_admin():
+        return abort(403)
+    recipients = _read_recipients()
+    now = datetime.now(IST).strftime('%Y-%m-%d')
+    csv_content = 'email\n' + '\n'.join(recipients)
+    resp = make_response(csv_content)
+    resp.headers['Content-Type'] = 'text/csv'
+    resp.headers['Content-Disposition'] = f'attachment; filename="subscribers_{now}.csv"'
+    return resp
 
 
 @app.route('/subscribers', methods=['GET', 'POST'])
@@ -570,11 +587,14 @@ def admin_subscribers():
 <p class="sub-count">{len(recipients)} address{'es' if len(recipients) != 1 else ''} on the mailing list</p>
 {'<p class="flash">✅ ' + flash + '</p>' if flash else ''}
 {'<p class="err-inline">⚠️ ' + error + '</p>' if error else ''}
-<form method="POST" class="add-row">
-  <input type="hidden" name="action" value="add">
-  <input type="email" name="email" placeholder="Add email address…" autocomplete="off">
-  <button class="add-btn" type="submit">+ Add</button>
-</form>
+<div class="toolbar">
+  <form method="POST" class="add-row" style="margin-bottom:0">
+    <input type="hidden" name="action" value="add">
+    <input type="email" name="email" placeholder="Add email address…" autocomplete="off">
+    <button class="add-btn" type="submit">+ Add</button>
+  </form>
+  <a class="export-btn" href="/subscribers/export">⬇ Export CSV</a>
+</div>
 {'<table><thead><tr><th>#</th><th>Email</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' if recipients else '<p class="empty">No subscribers yet.</p>'}
 <form method="POST" style="margin-top:32px">
   <input type="hidden" name="action" value="logout">
