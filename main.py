@@ -1,21 +1,24 @@
 import os
 import glob
 import re
+import hashlib
 import subprocess
 import sys
 import threading
 import time
 import logging
 from datetime import datetime
+from functools import wraps
 
 import pytz
-from flask import Flask, send_file, abort, Response, jsonify, request
+from flask import Flask, send_file, abort, Response, jsonify, request, session
 from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('SESSION_SECRET', 'nse-dashboard-secret')
 
 SCRIPT = 'rsi_mtf_report_nse.py'
 IST = pytz.timezone('Asia/Kolkata')
@@ -452,6 +455,108 @@ def charts(filename):
     if not os.path.exists(path):
         abort(404)
     return send_file(path)
+
+
+def _check_admin():
+    pw = os.environ.get('ADMIN_PASSWORD', '')
+    return session.get('admin_ok') and session.get('admin_hash') == hashlib.sha256(pw.encode()).hexdigest()
+
+
+_ADMIN_CSS = """
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 32px 16px; }
+  h1 { color: #38bdf8; font-size: 1.6rem; margin-bottom: 6px; }
+  .sub-count { color: #64748b; font-size: 0.9rem; margin-bottom: 24px; }
+  .back { color: #64748b; font-size: 0.85rem; text-decoration: none; display: inline-block; margin-bottom: 20px; }
+  .back:hover { color: #38bdf8; }
+  table { width: 100%; max-width: 680px; border-collapse: collapse; margin-top: 8px; }
+  th { text-align: left; font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;
+       padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e293b; font-size: 0.9rem; color: #cbd5e1; }
+  tr:hover td { background: #1e293b; }
+  .del { background: none; border: 1px solid #475569; color: #94a3b8; border-radius: 20px;
+         padding: 4px 14px; font-size: 0.8rem; cursor: pointer; }
+  .del:hover { border-color: #f87171; color: #f87171; }
+  .empty { color: #475569; margin-top: 24px; }
+  .login-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 80vh; gap: 12px; }
+  .login-card { background: #1e293b; border: 1px solid #334155; border-radius: 14px; padding: 32px 40px; width: 100%; max-width: 360px; text-align: center; }
+  .login-card h2 { color: #38bdf8; margin-bottom: 20px; font-size: 1.2rem; }
+  .login-card input { width: 100%; background: #0f172a; border: 1px solid #475569; border-radius: 8px;
+    padding: 10px 14px; color: #e2e8f0; font-size: 0.95rem; margin-bottom: 14px; outline: none; }
+  .login-card input:focus { border-color: #38bdf8; }
+  .login-card button { width: 100%; background: #38bdf8; color: #0f172a; border: none; border-radius: 24px;
+    padding: 10px; font-size: 0.95rem; font-weight: 700; cursor: pointer; }
+  .login-card button:hover { background: #7dd3fc; }
+  .err-msg { color: #f87171; font-size: 0.85rem; margin-top: -8px; margin-bottom: 8px; }
+  .flash { color: #4ade80; font-size: 0.85rem; margin-bottom: 16px; }
+"""
+
+
+@app.route('/subscribers', methods=['GET', 'POST'])
+def admin_subscribers():
+    pw = os.environ.get('ADMIN_PASSWORD', '')
+    error = ''
+    flash = ''
+
+    if request.method == 'POST':
+        action = request.form.get('action', '')
+        if action == 'login':
+            entered = request.form.get('password', '')
+            if entered == pw:
+                session['admin_ok'] = True
+                session['admin_hash'] = hashlib.sha256(pw.encode()).hexdigest()
+            else:
+                error = 'Incorrect password.'
+        elif action == 'logout':
+            session.clear()
+        elif action == 'delete' and _check_admin():
+            email = request.form.get('email', '').strip().lower()
+            if email:
+                _remove_recipient(email)
+                _push_to_github(f'admin: remove {email}')
+                flash = f'Removed {email}'
+
+    if not _check_admin():
+        html = f"""<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Login</title><style>{_ADMIN_CSS}</style></head><body>
+<div class="login-wrap">
+  <div class="login-card">
+    <h2>🔒 Admin Login</h2>
+    {'<p class="err-msg">' + error + '</p>' if error else ''}
+    <form method="POST">
+      <input type="hidden" name="action" value="login">
+      <input type="password" name="password" placeholder="Password" autofocus>
+      <button type="submit">Log in</button>
+    </form>
+  </div>
+</div>
+</body></html>"""
+        return Response(html, mimetype='text/html')
+
+    recipients = _read_recipients()
+    rows = ''.join(
+        f'<tr><td>{i+1}</td><td>{r}</td><td>'
+        f'<form method="POST" onsubmit="return confirm(\'Remove {r}?\');">'
+        f'<input type="hidden" name="action" value="delete">'
+        f'<input type="hidden" name="email" value="{r}">'
+        f'<button class="del" type="submit">Remove</button></form></td></tr>'
+        for i, r in enumerate(recipients)
+    )
+    html = f"""<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Subscribers — Admin</title><style>{_ADMIN_CSS}</style></head><body>
+<a class="back" href="/">← Back to dashboard</a>
+<h1>📋 Subscribers</h1>
+<p class="sub-count">{len(recipients)} address{'es' if len(recipients) != 1 else ''} on the mailing list</p>
+{'<p class="flash">✅ ' + flash + '</p>' if flash else ''}
+{'<table><thead><tr><th>#</th><th>Email</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' if recipients else '<p class="empty">No subscribers yet.</p>'}
+<form method="POST" style="margin-top:32px">
+  <input type="hidden" name="action" value="logout">
+  <button class="del" type="submit">Log out</button>
+</form>
+</body></html>"""
+    return Response(html, mimetype='text/html')
 
 
 if __name__ == '__main__':
