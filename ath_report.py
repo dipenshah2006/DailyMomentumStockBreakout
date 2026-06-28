@@ -342,6 +342,18 @@ def build_html(results, run_ts):
         rta_str = f"+{rta:.0f}%" if rta is not None else "—"
         rta_clr = "#00d4ff" if (rta and rta >= 500) else "#26d07c" if (rta and rta >= 100) else "#8b949e"
 
+        # % from ATH: positive = above ATH (new breakout), negative = below ATH
+        ap = r["ath_pct"]
+        if ap >= 0:
+            ath_pct_str = f"+{ap:.1f}%"
+            ath_pct_clr = "#00ff88"
+        else:
+            ath_pct_str = f"{ap:.1f}%"
+            ath_pct_clr = ("#f0b429" if ap >= -5 else
+                           "#fb923c" if ap >= -10 else
+                           "#f97316" if ap >= -20 else
+                           "#ff6b6b")
+
         rows.append(f'''<tr data-cat="{cat}" data-phase="{r['phase']}" data-ath="{r['ath_pct']}">
   <td style="color:#8b949e;text-align:center">{i}</td>
   <td>
@@ -350,6 +362,7 @@ def build_html(results, run_ts):
   </td>
   <td style="text-align:right">{fmt_inr(r['close'])}</td>
   <td style="text-align:center">{ath_badge(r)}</td>
+  <td style="text-align:right;color:{ath_pct_clr};font-weight:700;font-size:13px">{ath_pct_str}</td>
   <td style="text-align:right;color:#8b949e;font-size:11px">{fmt_inr(r['ath_price'])}<br><span style="font-size:10px">{r['ath_date']}</span></td>
   <td style="text-align:center;color:#8b949e;font-size:11px">{r['ath_time']}</td>
   <td style="text-align:right;color:{r52_clr};font-weight:700">{r52_str}</td>
@@ -463,17 +476,18 @@ tr:hover td{{background:#161b2288}}
   <th onclick="thSort(0)">#</th>
   <th onclick="thSort(1)" style="text-align:left">Ticker / Company</th>
   <th onclick="thSort(2)">Price</th>
-  <th onclick="thSort(3)" style="text-align:center">ATH Distance</th>
-  <th onclick="thSort(4)">ATH Price</th>
-  <th onclick="thSort(5)">ATH Time</th>
-  <th onclick="thSort(6)" title="% rise from 52-week low to current price">↑ 52W Low</th>
-  <th onclick="thSort(7)" title="% ATH price rose from all-time low">↑ ATH from Low</th>
-  <th onclick="thSort(8)">52W Dist</th>
-  <th onclick="thSort(9)">RSI D</th>
-  <th onclick="thSort(10)">RSI W</th>
-  <th onclick="thSort(11)">RSI M</th>
-  <th onclick="thSort(12)">Vol Ratio</th>
-  <th onclick="thSort(13)" style="text-align:center">Phase</th>
+  <th onclick="thSort(3)" style="text-align:center">ATH Status</th>
+  <th onclick="thSort(4)" title="Current price % above or below ATH (green = above, red = below)">% vs ATH</th>
+  <th onclick="thSort(5)">ATH Price</th>
+  <th onclick="thSort(6)">ATH Time</th>
+  <th onclick="thSort(7)" title="% rise from 52-week low to current price">↑ 52W Low</th>
+  <th onclick="thSort(8)" title="% ATH price rose from all-time low">↑ ATH from Low</th>
+  <th onclick="thSort(9)">52W Dist</th>
+  <th onclick="thSort(10)">RSI D</th>
+  <th onclick="thSort(11)">RSI W</th>
+  <th onclick="thSort(12)">RSI M</th>
+  <th onclick="thSort(13)">Vol Ratio</th>
+  <th onclick="thSort(14)" style="text-align:center">Phase</th>
 </tr>
 </thead>
 <tbody id="tableBody">
