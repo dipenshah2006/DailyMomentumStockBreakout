@@ -176,9 +176,15 @@ def analyse(symbol, name, cache):
         vol_today = float(vol.iloc[-1])
         vol_ratio = round(vol_today / vol_avg, 1) if vol_avg and vol_avg > 0 else None
 
-        # 52-week high
-        high52 = float(df["High"].tail(252).max()) if len(df) >= 252 else float(df["High"].max())
-        dist52 = round((last_close / high52 - 1) * 100, 1)
+        # 52-week high & low
+        high52   = float(df["High"].tail(252).max()) if len(df) >= 252 else float(df["High"].max())
+        low52    = float(df["Low"].tail(252).min())  if len(df) >= 252 else float(df["Low"].min())
+        dist52   = round((last_close / high52 - 1) * 100, 1)
+        # % the stock has risen from its 52-week low to current price
+        rise_52w = round((last_close / low52 - 1) * 100, 1) if low52 > 0 else None
+        # All-time low (full history) → % rise to ATH
+        all_low      = float(df["Low"].min())
+        rise_to_ath  = round((ath_price / all_low - 1) * 100, 1) if all_low > 0 else None
 
         # EMA trend (simple phase)
         ema20  = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
@@ -196,23 +202,26 @@ def analyse(symbol, name, cache):
         mcap = None
 
         result = {
-            "symbol":    symbol,
-            "name":      name[:35],
-            "yf_sym":    yf_sym,
-            "close":     round(last_close, 2),
-            "ath_price": round(ath_price, 2),
-            "ath_pct":   ath_pct,
-            "is_ath":    is_ath,
-            "ath_date":  ath_date,
-            "ath_time":  ath_time,
-            "rsi_d":     rsi_d,
-            "rsi_w":     rsi_w,
-            "rsi_m":     rsi_m,
-            "vol_ratio": vol_ratio,
-            "dist52":    dist52,
-            "high52":    round(high52, 2),
-            "phase":     phase,
-            "bars":      len(df),
+            "symbol":       symbol,
+            "name":         name[:35],
+            "yf_sym":       yf_sym,
+            "close":        round(last_close, 2),
+            "ath_price":    round(ath_price, 2),
+            "ath_pct":      ath_pct,
+            "is_ath":       is_ath,
+            "ath_date":     ath_date,
+            "ath_time":     ath_time,
+            "rsi_d":        rsi_d,
+            "rsi_w":        rsi_w,
+            "rsi_m":        rsi_m,
+            "vol_ratio":    vol_ratio,
+            "dist52":       dist52,
+            "high52":       round(high52, 2),
+            "low52":        round(low52, 2),
+            "rise_52w":     rise_52w,
+            "rise_to_ath":  rise_to_ath,
+            "phase":        phase,
+            "bars":         len(df),
         }
         cache[yf_sym] = result
         return result
@@ -323,6 +332,16 @@ def build_html(results, run_ts):
         d52_clr = "#26d07c" if r["dist52"] >= -2 else "#f0b429" if r["dist52"] >= -10 else "#8b949e"
         cat     = ath_category(r)
 
+        # % up from 52W low → colour: green ≥100%, gold ≥50%, else sub
+        r52  = r.get("rise_52w")
+        r52_str = f"+{r52:.1f}%" if r52 is not None else "—"
+        r52_clr = "#26d07c" if (r52 and r52 >= 100) else "#f0b429" if (r52 and r52 >= 50) else "#8b949e"
+
+        # % ATH rose from all-time low (rally magnitude)
+        rta  = r.get("rise_to_ath")
+        rta_str = f"+{rta:.0f}%" if rta is not None else "—"
+        rta_clr = "#00d4ff" if (rta and rta >= 500) else "#26d07c" if (rta and rta >= 100) else "#8b949e"
+
         rows.append(f'''<tr data-cat="{cat}" data-phase="{r['phase']}" data-ath="{r['ath_pct']}">
   <td style="color:#8b949e;text-align:center">{i}</td>
   <td>
@@ -333,6 +352,8 @@ def build_html(results, run_ts):
   <td style="text-align:center">{ath_badge(r)}</td>
   <td style="text-align:right;color:#8b949e;font-size:11px">{fmt_inr(r['ath_price'])}<br><span style="font-size:10px">{r['ath_date']}</span></td>
   <td style="text-align:center;color:#8b949e;font-size:11px">{r['ath_time']}</td>
+  <td style="text-align:right;color:{r52_clr};font-weight:700">{r52_str}</td>
+  <td style="text-align:right;color:{rta_clr};font-size:11px">{rta_str}</td>
   <td style="text-align:right;color:{d52_clr}">{r['dist52']:+.1f}%</td>
   <td style="text-align:right;color:{rsi_color(rd)};font-weight:700">{rd if rd else "—"}</td>
   <td style="text-align:right;color:{rsi_color(rw)}">{rw if rw else "—"}</td>
@@ -445,12 +466,14 @@ tr:hover td{{background:#161b2288}}
   <th onclick="thSort(3)" style="text-align:center">ATH Distance</th>
   <th onclick="thSort(4)">ATH Price</th>
   <th onclick="thSort(5)">ATH Time</th>
-  <th onclick="thSort(6)">52W Dist</th>
-  <th onclick="thSort(7)">RSI D</th>
-  <th onclick="thSort(8)">RSI W</th>
-  <th onclick="thSort(9)">RSI M</th>
-  <th onclick="thSort(10)">Vol Ratio</th>
-  <th onclick="thSort(11)" style="text-align:center">Phase</th>
+  <th onclick="thSort(6)" title="% rise from 52-week low to current price">↑ 52W Low</th>
+  <th onclick="thSort(7)" title="% ATH price rose from all-time low">↑ ATH from Low</th>
+  <th onclick="thSort(8)">52W Dist</th>
+  <th onclick="thSort(9)">RSI D</th>
+  <th onclick="thSort(10)">RSI W</th>
+  <th onclick="thSort(11)">RSI M</th>
+  <th onclick="thSort(12)">Vol Ratio</th>
+  <th onclick="thSort(13)" style="text-align:center">Phase</th>
 </tr>
 </thead>
 <tbody id="tableBody">
