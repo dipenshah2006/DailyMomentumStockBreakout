@@ -5,7 +5,7 @@ on:
     paths:
       - 'india/NSE/**'           # triggers when CSV files are updated
   schedule:
-    - cron: '30 23 * * 0-4'     # 5:00 AM IST (Mon–Fri) = 11:30 PM UTC Sun–Thu
+    - cron: '30 23 * * 0-5'     # 5:00 AM IST (Mon–Sat) = 11:30 PM UTC Sun–Fri
   workflow_dispatch:             # manual trigger from GitHub UI
     inputs:
       max_chart_stocks:
