@@ -1,0 +1,1 @@
+- [Full NSE Scanner](nse-scanner.md) — multibagger_report.py now scans 2657 stocks (NSE Cash + SME) with Darvas, Blast, S/R, trend channels; charts saved as PNGs to charts/multibagger/
