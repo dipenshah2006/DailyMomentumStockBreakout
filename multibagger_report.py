@@ -28,14 +28,14 @@ REPORT_HTML   = "multibagger_report.html"
 LOOKBACK_YEARS = 10
 IST_OFFSET     = "+05:30"
 
-WATCHLIST = {
-    "NCC":              "NCC.NS",
-    "Mankind Pharma":   "MANKIND.NS",
-    "Dixon Technologies":"DIXON.NS",
-    "Polycab India":    "POLYCAB.NS",
-    "Astral":           "ASTRAL.NS",
-    "Tube Investments": "TIINDIA.NS",
-}
+NSE_EQ_CSV  = "india/NSE/NSECash/EQUITY_L.csv"
+NSE_SME_CSV = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
+
+# Pre-screen thresholds (pass 1 — fast batch scan)
+SCREEN_M_RSI  = 55    # Monthly RSI minimum to qualify
+SCREEN_ATH    = -25   # Max % below ATH to qualify (-25 = within 25% of ATH)
+SCREEN_W_RSI  = 50    # Weekly RSI minimum to qualify
+BATCH_SIZE    = 50    # tickers per yfinance batch download
 
 # Strategy thresholds
 M_RSI_STRONG  = 70     # Monthly RSI above this = strong trend
@@ -953,66 +953,203 @@ def _trade_table(trades):
     </div>'''
 
 
+# ── Universe Loader ───────────────────────────────────────────────────────────
+def load_universe():
+    """Load all NSE EQ + SME stocks. Returns list of (display_name, ticker_with_NS)."""
+    import csv as _csv
+    stocks = []
+    seen   = set()
+
+    # NSE EQ (EQUITY_L.csv)
+    if os.path.exists(NSE_EQ_CSV):
+        with open(NSE_EQ_CSV, encoding='utf-8', errors='replace') as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                sym    = row.get('SYMBOL', '').strip()
+                series = row.get(' SERIES', row.get('SERIES', '')).strip()
+                name   = row.get('NAME OF COMPANY', sym).strip()
+                if sym and series == 'EQ' and sym not in seen:
+                    seen.add(sym)
+                    stocks.append((name or sym, sym + '.NS'))
+        print(f"  Loaded {len(stocks)} NSE EQ stocks from {NSE_EQ_CSV}")
+    else:
+        print(f"  ⚠ NSE EQ CSV not found: {NSE_EQ_CSV}")
+
+    # NSE SME (MW-SME CSV) — headers have BOM + trailing spaces, values are clean
+    sme_count = 0
+    if os.path.exists(NSE_SME_CSV):
+        with open(NSE_SME_CSV, encoding='utf-8-sig', errors='replace') as f:
+            reader = _csv.DictReader(f)
+            # Find the key that holds the symbol (headers may have trailing spaces/quotes)
+            sym_key = None
+            for row in reader:
+                if sym_key is None:
+                    sym_key = next((k for k in row if 'SYMBOL' in k.upper()), None)
+                    if sym_key is None:
+                        break
+                sym = row.get(sym_key, '').strip().strip('"')
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    stocks.append((sym, sym + '.NS'))
+                    sme_count += 1
+        print(f"  Loaded {sme_count} SME stocks from {NSE_SME_CSV}")
+    else:
+        print(f"  ⚠ SME CSV not found: {NSE_SME_CSV}")
+
+    return stocks
+
+
+# ── Batch Pre-screen ──────────────────────────────────────────────────────────
+def batch_prescreen(universe):
+    """
+    Fast pass-1 scan: download 2 years of daily data in batches of BATCH_SIZE,
+    compute Monthly RSI, Weekly RSI, ATH%, and return qualifying (name, ticker) pairs.
+    """
+    import yfinance as yf
+
+    qualifying = []
+    tickers    = [t for _, t in universe]
+    name_map   = {t: n for n, t in universe}
+
+    end   = datetime.today()
+    start = (end - timedelta(days=2 * 365 + 30)).strftime('%Y-%m-%d')
+    end_s = end.strftime('%Y-%m-%d')
+
+    total  = len(tickers)
+    passed = 0
+
+    for i in range(0, total, BATCH_SIZE):
+        batch = tickers[i:i + BATCH_SIZE]
+        pct   = (i / total) * 100
+        print(f"  Pre-screen {i+1}–{min(i+BATCH_SIZE, total)}/{total} ({pct:.0f}%)…", end=' ')
+
+        try:
+            raw = yf.download(
+                batch, start=start, end=end_s,
+                progress=False, auto_adjust=True, group_by='ticker',
+                threads=True
+            )
+        except Exception as e:
+            print(f"batch error: {e}")
+            continue
+
+        for ticker in batch:
+            try:
+                # Extract per-ticker data from multi-ticker download
+                if len(batch) == 1:
+                    df = raw.copy()
+                else:
+                    if ticker not in raw.columns.get_level_values(0):
+                        continue
+                    df = raw[ticker].copy()
+
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df[['Open','High','Low','Close','Volume']].dropna()
+                if len(df) < 60:
+                    continue
+
+                # Quick ATH%
+                ath     = df['Close'].expanding().max()
+                ath_pct = ((df['Close'].iloc[-1] / ath.iloc[-1]) - 1) * 100
+                if ath_pct < SCREEN_ATH:
+                    continue
+
+                # Quick Monthly RSI
+                df_m    = df.resample('ME').agg({'Close': 'last'}).dropna()
+                if len(df_m) < 15:
+                    continue
+                m_rsi_s = rsi(df_m['Close'], 14)
+                m_rsi   = m_rsi_s.iloc[-1]
+                if m_rsi < SCREEN_M_RSI:
+                    continue
+
+                # Quick Weekly RSI
+                df_w    = df.resample('W').agg({'Close': 'last'}).dropna()
+                if len(df_w) < 10:
+                    continue
+                w_rsi_s = rsi(df_w['Close'], 14)
+                w_rsi   = w_rsi_s.iloc[-1]
+                if w_rsi < SCREEN_W_RSI:
+                    continue
+
+                qualifying.append((name_map[ticker], ticker))
+                passed += 1
+
+            except Exception:
+                continue
+
+        print(f"qualified so far: {passed}")
+
+    return qualifying
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     run_ts = datetime.now().strftime('%Y-%m-%d %H:%M')
     print(f"\n{'='*60}")
-    print(f"  MULTIBAGGER REPORT — {run_ts}")
+    print(f"  MULTIBAGGER REPORT — NSE FULL UNIVERSE SCAN")
+    print(f"  {run_ts}")
     print(f"{'='*60}")
 
+    # ── Pass 1: load universe ─────────────────────────────────────────────────
+    print(f"\n[1/3] Loading NSE+SME universe…")
+    universe = load_universe()
+    print(f"  Total stocks to pre-screen: {len(universe)}")
+
+    # ── Pass 2: fast pre-screen ───────────────────────────────────────────────
+    print(f"\n[2/3] Pre-screening (M-RSI>{SCREEN_M_RSI}, W-RSI>{SCREEN_W_RSI}, "
+          f"ATH>{SCREEN_ATH}%)…")
+    qualified = batch_prescreen(universe)
+    print(f"\n  ✅ {len(qualified)} stocks passed pre-screen — generating full analysis…")
+
+    if not qualified:
+        print("  No stocks qualified. Exiting.")
+        return
+
+    # ── Pass 3: full analysis + charts for every qualifying stock ─────────────
+    print(f"\n[3/3] Full analysis + charts for {len(qualified)} stocks…")
     results = []
 
-    for name, ticker in WATCHLIST.items():
-        print(f"\n→ {name} ({ticker})")
+    for idx, (name, ticker) in enumerate(qualified, 1):
+        print(f"\n  [{idx}/{len(qualified)}] {name} ({ticker})")
 
-        # Fetch data
         df_d = fetch_data(ticker)
         if df_d is None:
-            print(f"  ✗ No data, skipping")
+            print(f"    ✗ No data, skipping")
             continue
-        print(f"  ✓ {len(df_d)} daily bars")
+        print(f"    ✓ {len(df_d)} daily bars")
 
-        # Resample
         df_w = resample_weekly(df_d)
         df_m = resample_monthly(df_d)
 
-        # Add indicators to all timeframes
         df_d = add_indicators(df_d)
         df_w = add_indicators(df_w)
         df_m = add_indicators(df_m)
 
-        # Generate signals
         signals = generate_signals(df_d, df_w, df_m)
+        trades  = backtest(df_d, signals)
+        fibs    = fibonacci_targets(df_d)
+        score   = compute_score(df_d, df_w, df_m, signals)
 
-        # Backtest
-        trades = backtest(df_d, signals)
-
-        # Fibonacci targets
-        fibs = fibonacci_targets(df_d)
-
-        # Score
-        score = compute_score(df_d, df_w, df_m, signals)
-
-        # Current values
-        d_rsi = round(df_d['RSI'].iloc[-1], 1)
-        w_rsi = round(df_w['RSI'].iloc[-1], 1) if len(df_w) > 0 else 0
-        m_rsi = round(df_m['RSI'].iloc[-1], 1) if len(df_m) > 0 else 0
+        d_rsi   = round(df_d['RSI'].iloc[-1], 1)
+        w_rsi   = round(df_w['RSI'].iloc[-1], 1) if len(df_w) > 0 else 0
+        m_rsi   = round(df_m['RSI'].iloc[-1], 1) if len(df_m) > 0 else 0
         us_macd = round(df_d['MACD_US'].iloc[-1], 5)
         price   = round(df_d['Close'].iloc[-1], 1)
         ath_pct = round(df_d['ATH_PCT'].iloc[-1], 1)
         signal  = signals.iloc[-1]
 
-        print(f"  D-RSI:{d_rsi:.0f}  W-RSI:{w_rsi:.0f}  M-RSI:{m_rsi:.0f}  "
+        print(f"    D-RSI:{d_rsi:.0f}  W-RSI:{w_rsi:.0f}  M-RSI:{m_rsi:.0f}  "
               f"ATH%:{ath_pct:+.1f}  Score:{score}  Signal:{signal}")
 
-        # Generate charts
-        print("  Generating charts…")
+        print(f"    Generating charts…")
         chart_d = generate_chart(name, df_d, df_w, df_m, signals, fibs, trades)
         chart_m = generate_monthly_chart(name, df_m)
         chart_w = generate_weekly_chart(name, df_w)
 
         results.append({
-            'name': name, 'ticker': ticker.replace('.NS',''),
+            'name': name, 'ticker': ticker.replace('.NS', ''),
             'price': price, 'ath_pct': ath_pct,
             'm_rsi': m_rsi, 'w_rsi': w_rsi, 'd_rsi': d_rsi,
             'us_macd': us_macd, 'score': score, 'signal': signal,
@@ -1024,7 +1161,7 @@ def main():
     results.sort(key=lambda r: r['score'], reverse=True)
 
     # Build HTML
-    print(f"\nBuilding HTML report…")
+    print(f"\nBuilding HTML report for {len(results)} stocks…")
     html = build_html(results, run_ts)
 
     tmp = REPORT_HTML + ".tmp"
@@ -1033,7 +1170,7 @@ def main():
     os.replace(tmp, REPORT_HTML)
 
     size_mb = os.path.getsize(REPORT_HTML) / 1024 / 1024
-    print(f"✅ Report saved: {REPORT_HTML} ({size_mb:.1f} MB)")
+    print(f"✅ Report saved: {REPORT_HTML} ({size_mb:.1f} MB, {len(results)} stocks)")
     return REPORT_HTML
 
 
