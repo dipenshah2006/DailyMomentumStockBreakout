@@ -29,3 +29,15 @@ pytz
 requests
 ta-lib-easy
 yfinance
+APScheduler
+beautifulsoup4
+flask
+gunicorn
+matplotlib
+numpy
+openpyxl
+pandas
+pytz
+requests
+ta-lib-easy
+yfinance
