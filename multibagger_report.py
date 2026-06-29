@@ -1,91 +1,127 @@
 #!/usr/bin/env python3
 """
-Multibagger Report — NSE Strong Momentum Scanner
-Scans NSE stocks for ATH Breakout + Multi-TF RSI + MACD + Fibonacci + Darvas Box
-Outputs: multibagger_report.html
+Multibagger Report v3.0 — NSE Cash + SME
+Features:
+  • ATH Breakout + Multi-TF RSI + MACD + Fibonacci + Darvas Box
+  • Support / Resistance + Trend Channel (weekly & monthly)
+  • Daily Blast — price breaks above S/R or trend-channel top on daily TF
+  • Charts with overlays saved to charts/
+  • Pushes output to GitHub when GITHUB_TOKEN is set
 """
 
-import os
-import sys
-import csv
-import time
-import warnings
-import pickle
+import os, sys, csv, time, warnings, pickle, re, subprocess
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import pytz
+import yfinance as yf
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
 
 warnings.filterwarnings("ignore")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OUTPUT_HTML     = "multibagger_report.html"
-LOCAL_NSE_CSV   = "india/NSE/NSECash/EQUITY_L.csv"
-DATA_YEARS      = 10
-BATCH_SIZE      = 20
-BATCH_PAUSE     = 1.0
-MAX_WORKERS     = 4
-CACHE_FILE      = "multibagger_cache.pkl"
-USE_CACHE       = True
-CACHE_MAX_AGE_H = 6
-IST             = pytz.timezone("Asia/Kolkata")
+OUTPUT_HTML      = "multibagger_report.html"
+NSE_CASH_CSV     = "india/NSE/NSECash/EQUITY_L.csv"
+NSE_SME_CSV      = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
+DATA_YEARS       = 6
+BATCH_SIZE       = 20
+BATCH_PAUSE      = 1.0
+MAX_WORKERS      = 4
+CACHE_FILE       = "multibagger_cache.pkl"
+USE_CACHE        = True
+CACHE_MAX_AGE_H  = 6
+CHARTS_DIR       = "charts"
+IST              = pytz.timezone("Asia/Kolkata")
 
-# ── Stock List Loader ─────────────────────────────────────────────────────────
-def load_nse_tickers():
-    tickers = []
-    if os.path.exists(LOCAL_NSE_CSV):
-        try:
-            with open(LOCAL_NSE_CSV, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    sym    = (row.get("SYMBOL") or row.get("Symbol") or "").strip()
-                    series = (row.get("SERIES") or row.get("Series") or "EQ").strip()
-                    name   = (row.get("NAME OF COMPANY") or row.get("Company Name") or sym).strip()
-                    if sym and series == "EQ":
-                        tickers.append((sym, name))
-            print(f"  Loaded {len(tickers)} NSE EQ stocks from CSV")
-            return tickers
-        except Exception as e:
-            print(f"  Warning: CSV error: {e}")
+os.makedirs(CHARTS_DIR, exist_ok=True)
 
-    fallback = [
-        ("RELIANCE","Reliance Industries"),("TCS","Tata Consultancy Services"),
-        ("HDFCBANK","HDFC Bank"),("INFY","Infosys"),("HINDUNILVR","Hindustan Unilever"),
-        ("ICICIBANK","ICICI Bank"),("SBIN","State Bank of India"),("BAJFINANCE","Bajaj Finance"),
-        ("BHARTIARTL","Bharti Airtel"),("KOTAKBANK","Kotak Mahindra Bank"),
-        ("LICI","LIC of India"),("WIPRO","Wipro"),("HCLTECH","HCL Technologies"),
-        ("LT","Larsen & Toubro"),("AXISBANK","Axis Bank"),("ASIANPAINT","Asian Paints"),
-        ("MARUTI","Maruti Suzuki"),("TITAN","Titan Company"),("SUNPHARMA","Sun Pharmaceutical"),
-        ("NTPC","NTPC"),("POWERGRID","Power Grid"),("ULTRACEMCO","UltraTech Cement"),
-        ("TECHM","Tech Mahindra"),("BAJAJFINSV","Bajaj Finserv"),("NESTLEIND","Nestle India"),
-        ("HINDALCO","Hindalco"),("ADANIENTS","Adani Enterprises"),("JSWSTEEL","JSW Steel"),
-        ("TATAMOTORS","Tata Motors"),("ADANIPORTS","Adani Ports"),
-        ("ONGC","ONGC"),("COALINDIA","Coal India"),("GRASIM","Grasim Industries"),
-        ("CIPLA","Cipla"),("DIVISLAB","Divi's Laboratories"),("DRREDDY","Dr. Reddy's"),
-        ("BPCL","BPCL"),("HEROMOTOCO","Hero MotoCorp"),("TATACONSUM","Tata Consumer"),
-        ("INDUSINDBK","IndusInd Bank"),("EICHERMOT","Eicher Motors"),("APOLLOHOSP","Apollo Hospitals"),
-        ("BRITANNIA","Britannia"),("BAJAJ-AUTO","Bajaj Auto"),("HDFCLIFE","HDFC Life"),
-        ("SBILIFE","SBI Life"),("TATASTEEL","Tata Steel"),("M&M","Mahindra & Mahindra"),
-        ("PIDILITIND","Pidilite Industries"),("HAVELLS","Havells India"),
-    ]
-    print(f"  Using fallback list of {len(fallback)} stocks")
-    return fallback
+# ── Stock loaders ─────────────────────────────────────────────────────────────
+def load_nse_cash():
+    rows = []
+    if not os.path.exists(NSE_CASH_CSV):
+        return rows
+    try:
+        with open(NSE_CASH_CSV, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sym    = (row.get("SYMBOL") or "").strip()
+                series = (row.get("SERIES") or row.get(" SERIES") or "EQ").strip()
+                name   = (row.get("NAME OF COMPANY") or sym).strip()
+                if sym and series == "EQ":
+                    rows.append((sym, name, "CASH"))
+        print(f"  NSE Cash: {len(rows)} EQ stocks")
+    except Exception as e:
+        print(f"  NSE Cash error: {e}")
+    return rows
 
-# ── Cache helpers ─────────────────────────────────────────────────────────────
+def load_nse_sme():
+    rows = []
+    if not os.path.exists(NSE_SME_CSV):
+        return rows
+    try:
+        with open(NSE_SME_CSV, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sym = (row.get("SYMBOL ") or row.get("SYMBOL") or "").strip().strip('"')
+                if sym:
+                    rows.append((sym, sym + " (SME)", "SME"))
+        print(f"  NSE SME: {len(rows)} stocks")
+    except Exception as e:
+        print(f"  NSE SME error: {e}")
+    return rows
+
+NIFTY50_FALLBACK = [
+    ("RELIANCE","Reliance Industries","CASH"),("TCS","Tata Consultancy Services","CASH"),
+    ("HDFCBANK","HDFC Bank","CASH"),("INFY","Infosys","CASH"),("ICICIBANK","ICICI Bank","CASH"),
+    ("SBIN","State Bank of India","CASH"),("BAJFINANCE","Bajaj Finance","CASH"),
+    ("BHARTIARTL","Bharti Airtel","CASH"),("KOTAKBANK","Kotak Mahindra Bank","CASH"),
+    ("LT","Larsen & Toubro","CASH"),("ASIANPAINT","Asian Paints","CASH"),
+    ("TITAN","Titan Company","CASH"),("SUNPHARMA","Sun Pharmaceutical","CASH"),
+    ("NTPC","NTPC","CASH"),("ULTRACEMCO","UltraTech Cement","CASH"),
+    ("TECHM","Tech Mahindra","CASH"),("MARUTI","Maruti Suzuki","CASH"),
+    ("WIPRO","Wipro","CASH"),("HCLTECH","HCL Technologies","CASH"),
+    ("ADANIENTS","Adani Enterprises","CASH"),("TATAMOTORS","Tata Motors","CASH"),
+    ("HINDALCO","Hindalco","CASH"),("JSWSTEEL","JSW Steel","CASH"),
+    ("ONGC","ONGC","CASH"),("COALINDIA","Coal India","CASH"),
+    ("PIDILITIND","Pidilite Industries","CASH"),("HAVELLS","Havells India","CASH"),
+    ("APOLLOHOSP","Apollo Hospitals","CASH"),("DIVISLAB","Divi's Lab","CASH"),
+    ("DRREDDY","Dr. Reddy's","CASH"),
+]
+
+def load_all_tickers():
+    cash = load_nse_cash()
+    sme  = load_nse_sme()
+    all_tickers = cash + sme
+    if not all_tickers:
+        print("  Using Nifty 50 fallback list")
+        all_tickers = NIFTY50_FALLBACK
+    seen = set()
+    deduped = []
+    for t in all_tickers:
+        if t[0] not in seen:
+            seen.add(t[0])
+            deduped.append(t)
+    print(f"  Total unique tickers: {len(deduped)}")
+    return deduped
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
 def load_cache():
     if not USE_CACHE or not os.path.exists(CACHE_FILE):
         return {}
     try:
         age_h = (time.time() - os.path.getmtime(CACHE_FILE)) / 3600
         if age_h > CACHE_MAX_AGE_H:
-            print(f"  Cache expired ({age_h:.1f}h old), fetching fresh data")
+            print(f"  Cache expired ({age_h:.1f}h old)")
             return {}
         with open(CACHE_FILE, "rb") as f:
             data = pickle.load(f)
-        print(f"  Cache loaded: {len(data)} stocks ({age_h:.1f}h old)")
+        print(f"  Cache: {len(data)} stocks ({age_h:.1f}h old)")
         return data
     except Exception:
         return {}
@@ -97,124 +133,294 @@ def save_cache(data):
     except Exception as e:
         print(f"  Cache save failed: {e}")
 
-# ── RSI ───────────────────────────────────────────────────────────────────────
+# ── Technical indicators ──────────────────────────────────────────────────────
 def calc_rsi(series, period=14):
     if len(series) < period + 1:
         return float("nan")
     delta = series.diff()
-    gain  = delta.clip(lower=0).ewm(com=period - 1, min_periods=period).mean()
-    loss  = (-delta.clip(upper=0)).ewm(com=period - 1, min_periods=period).mean()
+    gain  = delta.clip(lower=0).ewm(com=period-1, min_periods=period).mean()
+    loss  = (-delta.clip(upper=0)).ewm(com=period-1, min_periods=period).mean()
     rs    = gain / loss.replace(0, np.nan)
-    return float((100 - (100 / (1 + rs))).iloc[-1])
+    return float((100 - 100 / (1 + rs)).iloc[-1])
 
-# ── MACD (ultra-slow) ─────────────────────────────────────────────────────────
 def calc_macd(series, fast=34, slow=1000, signal=20):
     if len(series) < slow:
         return float("nan"), float("nan")
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return float(macd_line.iloc[-1]), float(signal_line.iloc[-1])
+    ema_f = series.ewm(span=fast, adjust=False).mean()
+    ema_s = series.ewm(span=slow, adjust=False).mean()
+    macd  = ema_f - ema_s
+    sig   = macd.ewm(span=signal, adjust=False).mean()
+    return float(macd.iloc[-1]), float(sig.iloc[-1])
 
-# ── Fibonacci Extensions ──────────────────────────────────────────────────────
 def calc_fib(df):
-    swing_low  = float(df["Low"].rolling(252).min().iloc[-1])
-    swing_high = float(df["High"].rolling(252).max().iloc[-1])
-    rng = swing_high - swing_low
+    sw_low  = float(df["Low"].rolling(252).min().iloc[-1])
+    sw_high = float(df["High"].rolling(252).max().iloc[-1])
+    rng     = sw_high - sw_low
+    return {"low": sw_low, "high": sw_high,
+            "f0618": sw_high + rng * 0.618, "f1618": sw_high + rng * 1.618,
+            "f2618": sw_high + rng * 2.618, "f4236": sw_high + rng * 4.236}
+
+# ── Support / Resistance ──────────────────────────────────────────────────────
+def find_pivot_highs(series, n=3):
+    """Swing highs: high[i] > all highs in window of n on each side."""
+    vals, pivots = series.values, []
+    for i in range(n, len(vals) - n):
+        window = list(range(i - n, i)) + list(range(i + 1, i + n + 1))
+        if all(vals[i] > vals[j] for j in window):
+            pivots.append((i, vals[i]))
+    return pivots
+
+def find_pivot_lows(series, n=3):
+    vals, pivots = series.values, []
+    for i in range(n, len(vals) - n):
+        window = list(range(i - n, i)) + list(range(i + 1, i + n + 1))
+        if all(vals[i] < vals[j] for j in window):
+            pivots.append((i, vals[i]))
+    return pivots
+
+def cluster_levels(levels, tol_pct=0.015):
+    """Merge nearby levels within tol_pct of each other."""
+    if not levels:
+        return []
+    levels = sorted(levels)
+    clusters = [[levels[0]]]
+    for v in levels[1:]:
+        if (v - clusters[-1][-1]) / clusters[-1][-1] < tol_pct:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    return [float(np.mean(c)) for c in clusters]
+
+def calc_sr_levels(df_tf, n_pivot=3, n_levels=4):
+    """Return top-N resistance and support levels from pivot analysis."""
+    ph = find_pivot_highs(df_tf["High"], n_pivot)
+    pl = find_pivot_lows(df_tf["Low"],  n_pivot)
+    resist_raw = [v for _, v in ph]
+    support_raw = [v for _, v in pl]
+    resist = cluster_levels(resist_raw)[-n_levels:]
+    support = cluster_levels(support_raw)[:n_levels]
+    return resist, support
+
+# ── Trend Channel ─────────────────────────────────────────────────────────────
+def calc_trend_channel(df_tf, window=52):
+    """Linear regression channel on last `window` bars of Close."""
+    sub = df_tf["Close"].tail(window).dropna()
+    if len(sub) < 10:
+        return None
+    x  = np.arange(len(sub))
+    m, b = np.polyfit(x, sub.values, 1)
+    fitted = m * x + b
+    residuals = sub.values - fitted
+    std = np.std(residuals)
     return {
-        "low":    swing_low,
-        "high":   swing_high,
-        "f0618":  swing_high + rng * 0.618,
-        "f1618":  swing_high + rng * 1.618,
-        "f2618":  swing_high + rng * 2.618,
-        "f4236":  swing_high + rng * 4.236,
+        "slope":  m,
+        "intercept": b,
+        "upper": fitted + 2 * std,
+        "lower": fitted - 2 * std,
+        "mid":   fitted,
+        "last_upper": float(fitted[-1] + 2 * std),
+        "last_lower": float(fitted[-1] - 2 * std),
+        "last_mid":   float(fitted[-1]),
+        "n": len(sub),
     }
 
 # ── Darvas Box ────────────────────────────────────────────────────────────────
 def calc_darvas_box(df, n_confirm=3, lookback=60):
-    """
-    Darvas Box for a given OHLC DataFrame.
-    Scans the last `lookback` bars to find the most recent valid box.
-    A box top is confirmed when a high is NOT exceeded for n_confirm consecutive bars.
-    A box bottom is confirmed when a low holds up for n_confirm consecutive bars after top.
-    Returns dict: top, bottom, status ('BREAKOUT'|'BREAKDOWN'|'INSIDE'|'FORMING'|'N/A'), width_pct
-    """
     if df is None or len(df) < n_confirm + 5:
         return {"top": None, "bottom": None, "status": "N/A", "width_pct": None}
-
-    data = df.tail(max(lookback, n_confirm + 10)).reset_index(drop=True)
+    data   = df.tail(max(lookback, n_confirm + 10)).reset_index(drop=True)
     highs  = data["High"].values
     lows   = data["Low"].values
     close  = float(data["Close"].iloc[-1])
     n      = len(data)
-
-    box_top    = None
-    box_bottom = None
-    top_idx    = None
-
-    # Scan right-to-left to find the most recent confirmed box top
+    box_top = box_bottom = top_idx = None
     for i in range(n - n_confirm - 1, 0, -1):
-        if all(highs[i + 1: i + n_confirm + 1] < highs[i]):
-            box_top = float(highs[i])
-            top_idx = i
+        if all(highs[i+1:i+n_confirm+1] < highs[i]):
+            box_top, top_idx = float(highs[i]), i
             break
-
     if box_top is None:
         return {"top": None, "bottom": None, "status": "FORMING", "width_pct": None}
-
-    # Find box bottom: lowest low in the formation window that holds for n_confirm bars
     sub_lows = lows[top_idx:]
     for j in range(len(sub_lows) - n_confirm):
-        if all(sub_lows[j + 1: j + n_confirm + 1] > sub_lows[j]):
+        if all(sub_lows[j+1:j+n_confirm+1] > sub_lows[j]):
             box_bottom = float(sub_lows[j])
             break
-
     if box_bottom is None:
         box_bottom = float(np.min(sub_lows))
-
-    # Determine status
-    if close > box_top:
-        status = "BREAKOUT"
-    elif close < box_bottom:
-        status = "BREAKDOWN"
-    else:
-        status = "INSIDE"
-
+    status = "BREAKOUT" if close > box_top else ("BREAKDOWN" if close < box_bottom else "INSIDE")
     width_pct = round((box_top - box_bottom) / box_bottom * 100, 1) if box_bottom else None
-
-    return {
-        "top":       round(box_top, 2),
-        "bottom":    round(box_bottom, 2),
-        "status":    status,
-        "width_pct": width_pct,
-    }
+    return {"top": round(box_top, 2), "bottom": round(box_bottom, 2),
+            "status": status, "width_pct": width_pct}
 
 def darvas_for_timeframes(df_daily):
-    """Compute Darvas Box for Daily, Weekly, Monthly resampled data."""
     results = {}
-    for tf, freq in [("Daily", "B"), ("Weekly", "W"), ("Monthly", "ME")]:
+    for tf, freq in [("Daily","B"), ("Weekly","W"), ("Monthly","ME")]:
         try:
-            if freq == "B":
-                df_tf = df_daily.copy()
-            else:
-                df_tf = df_daily.resample(freq).agg({
-                    "Open":   "first",
-                    "High":   "max",
-                    "Low":    "min",
-                    "Close":  "last",
-                    "Volume": "sum",
-                }).dropna()
-            results[tf] = calc_darvas_box(df_tf, n_confirm=3 if tf == "Daily" else 2, lookback=60)
+            df_tf = df_daily if freq == "B" else df_daily.resample(freq).agg(
+                {"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+            results[tf] = calc_darvas_box(df_tf, n_confirm=3 if tf=="Daily" else 2, lookback=60)
         except Exception:
             results[tf] = {"top": None, "bottom": None, "status": "N/A", "width_pct": None}
     return results
 
-# ── Signal + Score ────────────────────────────────────────────────────────────
-def compute_signal(drsi, wrsi, mrsi, macd_v, macd_s, ath_pct, vol_ratio, darvas_d):
-    signal = "WATCH"
-    score  = 0
+# ── Daily Blast Detection ─────────────────────────────────────────────────────
+def detect_daily_blast(df_daily, w_resist, m_resist, w_channel, m_channel):
+    """
+    Blast = daily close today breaks above ANY of:
+      - Weekly resistance level
+      - Monthly resistance level
+      - Weekly trend-channel upper band
+      - Monthly trend-channel upper band
+    Also checks the prior 5 days to catch very recent breakouts.
+    Returns: (is_blast, reasons[])
+    """
+    if df_daily is None or len(df_daily) < 10:
+        return False, []
 
+    recent = df_daily["Close"].tail(5)
+    prev5_high = float(df_daily["High"].iloc[-6:-1].max()) if len(df_daily) >= 6 else None
+    last_close = float(df_daily["Close"].iloc[-1])
+    reasons = []
+
+    # Check weekly resistance
+    for lvl in w_resist:
+        if prev5_high is not None and prev5_high < lvl <= last_close:
+            reasons.append(f"W-Resist ₹{lvl:,.0f}")
+        elif last_close > lvl * 1.001:
+            reasons.append(f"Above W-Resist ₹{lvl:,.0f}")
+
+    # Check monthly resistance
+    for lvl in m_resist:
+        if prev5_high is not None and prev5_high < lvl <= last_close:
+            reasons.append(f"M-Resist ₹{lvl:,.0f}")
+        elif last_close > lvl * 1.001:
+            reasons.append(f"Above M-Resist ₹{lvl:,.0f}")
+
+    # Check weekly channel upper
+    if w_channel and last_close > w_channel["last_upper"]:
+        reasons.append(f"W-Channel Top ₹{w_channel['last_upper']:,.0f}")
+
+    # Check monthly channel upper
+    if m_channel and last_close > m_channel["last_upper"]:
+        reasons.append(f"M-Channel Top ₹{m_channel['last_upper']:,.0f}")
+
+    # Deduplicate
+    seen, dedup = set(), []
+    for r in reasons:
+        key = r.split("₹")[0].strip()
+        if key not in seen:
+            seen.add(key)
+            dedup.append(r)
+
+    return len(dedup) > 0, dedup[:3]
+
+# ── Chart generation ──────────────────────────────────────────────────────────
+def draw_chart(symbol, df_daily, w_resist, w_support, m_resist, m_support,
+               w_channel, m_channel, darvas, is_blast):
+    """
+    Generate a 2-panel chart (Weekly | Monthly) with S/R + channel overlays.
+    Saved to charts/{symbol}_mb.png
+    """
+    try:
+        chart_path = os.path.join(CHARTS_DIR, f"{symbol}_mb.png")
+
+        df_w = df_daily.resample("W").agg(
+            {"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna().tail(78)
+        df_m = df_daily.resample("ME").agg(
+            {"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna().tail(36)
+
+        fig, axes = plt.subplots(2, 1, figsize=(14, 9),
+                                 facecolor="#0d1117", gridspec_kw={"hspace": 0.38})
+        fig.suptitle(f"{symbol} — Weekly & Monthly S/R + Trend Channel",
+                     color="#e6edf3", fontsize=13, fontweight="bold", y=0.98)
+
+        for ax, df_tf, resist, support, channel, label, color_ch in [
+            (axes[0], df_w, w_resist, w_support, w_channel, "Weekly",  "#60a5fa"),
+            (axes[1], df_m, m_resist, m_support, m_channel, "Monthly", "#c084fc"),
+        ]:
+            ax.set_facecolor("#0d1117")
+            ax.tick_params(colors="#8b949e", labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#21262d")
+            ax.grid(color="#21262d", linewidth=0.4, linestyle="--", alpha=0.6)
+
+            idx   = np.arange(len(df_tf))
+            close = df_tf["Close"].values
+            highs = df_tf["High"].values
+            lows  = df_tf["Low"].values
+
+            # Candle wicks
+            for i in range(len(idx)):
+                c = "#26d07c" if close[i] >= df_tf["Open"].values[i] else "#ff6b6b"
+                ax.plot([idx[i], idx[i]], [lows[i], highs[i]], color=c, linewidth=0.8, alpha=0.7)
+                h = abs(close[i] - df_tf["Open"].values[i])
+                bot = min(close[i], df_tf["Open"].values[i])
+                ax.bar(idx[i], h, bottom=bot, color=c, width=0.6, alpha=0.85)
+
+            # Trend Channel
+            if channel:
+                n = channel["n"]
+                x_ch = np.arange(max(0, len(df_tf) - n), len(df_tf))
+                up  = channel["upper"][-len(x_ch):]
+                mid = channel["mid"][-len(x_ch):]
+                lo  = channel["lower"][-len(x_ch):]
+                ax.fill_between(x_ch, lo, up, color=color_ch, alpha=0.08)
+                ax.plot(x_ch, up,  color=color_ch, linewidth=1.2, linestyle="--", alpha=0.8, label="Channel Top")
+                ax.plot(x_ch, mid, color=color_ch, linewidth=0.8, linestyle=":",  alpha=0.6, label="Channel Mid")
+                ax.plot(x_ch, lo,  color=color_ch, linewidth=1.2, linestyle="--", alpha=0.8, label="Channel Bot")
+
+            # Support / Resistance lines
+            price_range = highs.max() - lows.min() if len(highs) > 0 else 1
+            for lvl in resist[-3:]:
+                if lows.min() - price_range*0.1 < lvl < highs.max() + price_range*0.1:
+                    ax.axhline(lvl, color="#ff6b6b", linewidth=1.1, linestyle="--", alpha=0.85)
+                    ax.annotate(f"R ₹{lvl:,.0f}", xy=(len(idx)-1, lvl),
+                                xytext=(2, 2), textcoords="offset points",
+                                color="#ff6b6b", fontsize=7, fontweight="bold")
+            for lvl in support[:3]:
+                if lows.min() - price_range*0.1 < lvl < highs.max() + price_range*0.1:
+                    ax.axhline(lvl, color="#26d07c", linewidth=1.1, linestyle="--", alpha=0.85)
+                    ax.annotate(f"S ₹{lvl:,.0f}", xy=(len(idx)-1, lvl),
+                                xytext=(2, -8), textcoords="offset points",
+                                color="#26d07c", fontsize=7, fontweight="bold")
+
+            # Darvas Box on last bars
+            dv = darvas.get(label.replace("ly",""), darvas.get(label, {}))
+            if dv.get("top") and dv.get("bottom"):
+                ax.axhline(dv["top"],    color="#60a5fa", linewidth=1.2, linestyle="-.", alpha=0.7)
+                ax.axhline(dv["bottom"], color="#60a5fa", linewidth=1.2, linestyle="-.", alpha=0.7)
+
+            # Blast marker
+            if is_blast and label == "Weekly":
+                ax.axvline(len(idx)-1, color="#ff8c00", linewidth=2.0, alpha=0.9)
+                ax.annotate("💥 BLAST", xy=(len(idx)-1, close[-1]),
+                            xytext=(-40, 12), textcoords="offset points",
+                            color="#ff8c00", fontsize=9, fontweight="bold")
+
+            ax.set_title(f"{label} — S/R + Trend Channel + Darvas",
+                         color="#8b949e", fontsize=9, pad=4)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"₹{x:,.0f}"))
+
+            # X-axis date labels (every N bars)
+            dates = df_tf.index
+            step = max(1, len(dates) // 8)
+            ax.set_xticks(idx[::step])
+            ax.set_xticklabels([dates[i].strftime("%b'%y") for i in idx[::step]],
+                               rotation=30, ha="right", fontsize=7)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
+        plt.savefig(chart_path, dpi=110, bbox_inches="tight",
+                    facecolor="#0d1117", edgecolor="none")
+        plt.close(fig)
+        return chart_path
+    except Exception as e:
+        print(f"  Chart error {symbol}: {e}")
+        plt.close("all")
+        return None
+
+# ── Signal & Score ────────────────────────────────────────────────────────────
+def compute_signal(drsi, wrsi, mrsi, macd_v, macd_s, ath_pct, vol_ratio, darvas_d, is_blast):
+    score, signal = 0, "WATCH"
     if not np.isnan(mrsi)  and mrsi  > 60: score += 20
     if not np.isnan(mrsi)  and mrsi  > 70: score += 10
     if not np.isnan(wrsi)  and wrsi  > 55: score += 15
@@ -225,9 +431,11 @@ def compute_signal(drsi, wrsi, mrsi, macd_v, macd_s, ath_pct, vol_ratio, darvas_
     if vol_ratio > 2.5: score += 10
     if darvas_d.get("status") == "BREAKOUT": score += 15
     if darvas_d.get("status") == "INSIDE":   score += 5
+    if is_blast: score += 25
 
-    # Signal label
-    if ath_pct >= -2 and not np.isnan(mrsi) and mrsi > 70:
+    if is_blast:
+        signal = "💥 DAILY BLAST"
+    elif ath_pct >= -2 and not np.isnan(mrsi) and mrsi > 70:
         signal = "🚀 STRONG BUY"
     elif not np.isnan(macd_v) and macd_v > 0 and not np.isnan(mrsi) and mrsi > 60:
         signal = "🌊 MACD MEGA BUY"
@@ -239,81 +447,67 @@ def compute_signal(drsi, wrsi, mrsi, macd_v, macd_s, ath_pct, vol_ratio, darvas_
         signal = "💜 M-RSI BUY"
     elif darvas_d.get("status") == "BREAKOUT":
         signal = "📦 DARVAS BUY"
-
     return signal, score
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 def run_backtest(df_daily):
-    trades  = []
-    in_trade = None
-    close    = df_daily["Close"]
-    highs    = df_daily["High"]
-    lows     = df_daily["Low"]
-    vol      = df_daily["Volume"]
-    avg_vol  = vol.rolling(20).mean()
-
+    trades, in_trade = [], None
+    close = df_daily["Close"]
+    highs = df_daily["High"]
+    lows  = df_daily["Low"]
+    vol   = df_daily["Volume"]
+    avg_vol = vol.rolling(20).mean()
     for i in range(50, len(df_daily) - 1):
         if in_trade:
-            entry_price = in_trade["entry"]
-            # Exit: stop-loss -8% or take-profit +25%
-            if lows.iloc[i] < entry_price * 0.92:
-                ret = round((entry_price * 0.92 / entry_price - 1) * 100, 1)
+            ep = in_trade["entry"]
+            if lows.iloc[i] < ep * 0.92:
+                ret = round((ep * 0.92 / ep - 1) * 100, 1)
                 trades.append({**in_trade, "exit_date": df_daily.index[i].strftime("%d %b %Y"),
-                                "exit_price": round(entry_price * 0.92, 1), "return_pct": ret,
+                                "exit_price": round(ep * 0.92, 1), "return_pct": ret,
                                 "days": (df_daily.index[i] - pd.Timestamp(in_trade["entry_date"])).days})
                 in_trade = None
-            elif highs.iloc[i] > entry_price * 1.25:
-                ret = round((entry_price * 1.25 / entry_price - 1) * 100, 1)
+            elif highs.iloc[i] > ep * 1.25:
+                ret = round((ep * 1.25 / ep - 1) * 100, 1)
                 trades.append({**in_trade, "exit_date": df_daily.index[i].strftime("%d %b %Y"),
-                                "exit_price": round(entry_price * 1.25, 1), "return_pct": ret,
+                                "exit_price": round(ep * 1.25, 1), "return_pct": ret,
                                 "days": (df_daily.index[i] - pd.Timestamp(in_trade["entry_date"])).days})
                 in_trade = None
             continue
-
-        sub  = close.iloc[:i+1]
+        sub = close.iloc[:i+1]
         drsi = calc_rsi(sub.tail(60), 14)
-        vr   = vol.iloc[i] / avg_vol.iloc[i] if avg_vol.iloc[i] > 0 else 1
-
+        vr = vol.iloc[i] / avg_vol.iloc[i] if avg_vol.iloc[i] > 0 else 1
         if not np.isnan(drsi) and drsi > 60 and vr > 1.5:
             in_trade = {"signal": "✅ BUY", "entry_date": df_daily.index[i].strftime("%d %b %Y"),
                         "entry": round(float(close.iloc[i]), 1)}
         elif vr > 2.5:
             in_trade = {"signal": "🔥 VOL BUY", "entry_date": df_daily.index[i].strftime("%d %b %Y"),
                         "entry": round(float(close.iloc[i]), 1)}
-
     stats = {}
     if trades:
         rets = [t["return_pct"] for t in trades]
         wins = [r for r in rets if r > 0]
-        stats = {
-            "trades":   len(trades),
-            "win_rate": round(len(wins) / len(trades) * 100, 1),
-            "avg_ret":  round(sum(rets) / len(rets), 1),
-            "best_ret": round(max(rets), 1),
-        }
+        stats = {"trades": len(trades), "win_rate": round(len(wins)/len(trades)*100, 1),
+                 "avg_ret": round(sum(rets)/len(rets), 1), "best_ret": round(max(rets), 1)}
     return trades, stats
 
 # ── Analyse one stock ─────────────────────────────────────────────────────────
-def analyse(symbol, name, cache):
-    yf_sym = symbol + ".NS"
-    if yf_sym in cache:
-        return cache[yf_sym]
+def analyse(symbol, name, segment, cache):
+    yf_sym = symbol + (".NS" if segment == "CASH" else ".NS")
+    cache_key = yf_sym + "_v3"
+    if cache_key in cache:
+        return cache[cache_key]
 
     try:
         end   = datetime.today()
         start = end - timedelta(days=DATA_YEARS * 365 + 90)
-        df = yf.download(
-            yf_sym,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            progress=False, auto_adjust=True
-        )
+        df = yf.download(yf_sym, start=start.strftime("%Y-%m-%d"),
+                         end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        if df.empty or len(df) < 50:
+        if df.empty or len(df) < 60:
             return None
-
         df = df[["Open","High","Low","Close","Volume"]].dropna()
+
         close = df["Close"]
         vol   = df["Volume"]
 
@@ -323,55 +517,76 @@ def analyse(symbol, name, cache):
         is_ath     = last_close >= ath_price * 0.99
         ath_pct    = round((last_close / ath_price - 1) * 100, 1)
 
-        # RSI (daily / weekly / monthly resample)
+        # Multi-TF RSI
         drsi = calc_rsi(close.tail(100), 14)
+        wrsi = calc_rsi(close.resample("W").last().dropna().tail(104), 14)
+        mrsi = calc_rsi(close.resample("ME").last().dropna().tail(60), 14)
 
-        weekly  = close.resample("W").last().dropna()
-        wrsi    = calc_rsi(weekly.tail(104), 14)
-
-        monthly = close.resample("ME").last().dropna()
-        mrsi    = calc_rsi(monthly.tail(60), 14)
-
-        # MACD ultra-slow (monthly close)
-        macd_v, macd_s = calc_macd(monthly, 34, 1000, 20)
+        # MACD ultra-slow (monthly)
+        monthly_close = close.resample("ME").last().dropna()
+        macd_v, macd_s = calc_macd(monthly_close, 34, 1000, 20)
 
         # Fibonacci
         fib = calc_fib(df)
 
         # Volume ratio
-        avg_vol  = float(vol.rolling(20).mean().iloc[-1])
-        last_vol = float(vol.iloc[-1])
-        vol_ratio = round(last_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+        avg_vol_20 = float(vol.rolling(20).mean().iloc[-1])
+        vol_ratio  = round(float(vol.iloc[-1]) / avg_vol_20, 2) if avg_vol_20 > 0 else 1.0
 
-        # ── Darvas Box (Daily / Weekly / Monthly) ──
-        darvas = darvas_for_timeframes(df)
+        # Weekly / Monthly S/R and Channel
+        df_w = df.resample("W").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+        df_m = df.resample("ME").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
 
-        # Blast-off: all three timeframes show breakout
-        darvas_statuses = [darvas[tf]["status"] for tf in ["Daily","Weekly","Monthly"]]
-        blast_off = all(s == "BREAKOUT" for s in darvas_statuses)
+        w_resist, w_support = calc_sr_levels(df_w.tail(104), n_pivot=3, n_levels=4)
+        m_resist, m_support = calc_sr_levels(df_m.tail(60),  n_pivot=2, n_levels=4)
+
+        w_channel = calc_trend_channel(df_w.tail(78),  window=52)
+        m_channel = calc_trend_channel(df_m.tail(36),  window=24)
+
+        # Darvas Box
+        darvas     = darvas_for_timeframes(df)
+        darvas_all = all(darvas[tf]["status"] == "BREAKOUT" for tf in ["Daily","Weekly","Monthly"])
+
+        # Daily Blast
+        is_blast, blast_reasons = detect_daily_blast(df, w_resist, m_resist, w_channel, m_channel)
 
         # Signal & Score
-        signal, score = compute_signal(drsi, wrsi, mrsi, macd_v, macd_s, ath_pct, vol_ratio, darvas["Daily"])
-        if blast_off:
+        signal, score = compute_signal(drsi, wrsi, mrsi, macd_v, macd_s,
+                                       ath_pct, vol_ratio, darvas["Daily"], is_blast)
+        if darvas_all and not is_blast:
             score += 20
             signal = "💥 DARVAS BLAST"
 
         # Backtest
         trades, bt = run_backtest(df)
 
+        # Chart
+        chart_file = draw_chart(symbol, df, w_resist, w_support, m_resist, m_support,
+                                 w_channel, m_channel, darvas, is_blast)
+
         result = {
-            "symbol": symbol, "name": name, "close": round(last_close, 2),
-            "ath_pct": ath_pct, "is_ath": is_ath,
+            "symbol": symbol, "name": name, "segment": segment,
+            "close": round(last_close, 2), "ath_pct": ath_pct, "is_ath": is_ath,
             "drsi": round(drsi, 1) if not np.isnan(drsi) else None,
             "wrsi": round(wrsi, 1) if not np.isnan(wrsi) else None,
             "mrsi": round(mrsi, 1) if not np.isnan(mrsi) else None,
             "macd": round(macd_v, 4) if not np.isnan(macd_v) else None,
             "fib": fib, "vol_ratio": vol_ratio,
-            "darvas": darvas, "blast_off": blast_off,
+            "darvas": darvas, "darvas_all": darvas_all,
+            "w_resist": w_resist, "w_support": w_support,
+            "m_resist": m_resist, "m_support": m_support,
+            "w_channel": {"last_upper": w_channel["last_upper"],
+                          "last_mid":   w_channel["last_mid"],
+                          "last_lower": w_channel["last_lower"]} if w_channel else None,
+            "m_channel": {"last_upper": m_channel["last_upper"],
+                          "last_mid":   m_channel["last_mid"],
+                          "last_lower": m_channel["last_lower"]} if m_channel else None,
+            "is_blast": is_blast, "blast_reasons": blast_reasons,
             "signal": signal, "score": score,
             "trades": trades, "bt": bt,
+            "chart": chart_file,
         }
-        cache[yf_sym] = result
+        cache[cache_key] = result
         return result
 
     except Exception as e:
@@ -381,174 +596,220 @@ def analyse(symbol, name, cache):
 # ── HTML helpers ──────────────────────────────────────────────────────────────
 def _rsi_color(v):
     if v is None: return "#8b949e"
-    if v >= 70:   return "#26d07c"
-    if v >= 55:   return "#f0b429"
+    if v >= 70: return "#26d07c"
+    if v >= 55: return "#f0b429"
     return "#ff6b6b"
 
 def _signal_badge(sig):
-    colors = {
-        "🚀 STRONG BUY":    ("#26d07c","#0d2615","#26d07c44"),
-        "🌊 MACD MEGA BUY": ("#00d4ff","#001a20","#00d4ff44"),
-        "✅ BUY":            ("#26d07c","#0d2615","#26d07c44"),
-        "🔥 VOL BUY":       ("#fbbf24","#2a1e00","#fbbf2444"),
-        "💜 M-RSI BUY":     ("#c084fc","#1a0d2a","#c084fc44"),
-        "📦 DARVAS BUY":    ("#60a5fa","#0d1a2a","#60a5fa44"),
-        "💥 DARVAS BLAST":  ("#ff8c00","#1a0900","#ff8c0044"),
-        "WATCH":            ("#8b949e","#161b22","#30363d"),
+    M = {
+        "💥 DAILY BLAST":  ("#ff8c00","#1a0900","#ff8c0044"),
+        "🚀 STRONG BUY":   ("#26d07c","#0d2615","#26d07c44"),
+        "🌊 MACD MEGA BUY":("#00d4ff","#001a20","#00d4ff44"),
+        "✅ BUY":           ("#26d07c","#0d2615","#26d07c44"),
+        "🔥 VOL BUY":      ("#fbbf24","#2a1e00","#fbbf2444"),
+        "💜 M-RSI BUY":    ("#c084fc","#1a0d2a","#c084fc44"),
+        "📦 DARVAS BUY":   ("#60a5fa","#0d1a2a","#60a5fa44"),
+        "💥 DARVAS BLAST": ("#ff8c00","#1a0900","#ff8c0044"),
+        "WATCH":           ("#8b949e","#161b22","#30363d"),
     }
-    fg, bg, bd = colors.get(sig, ("#8b949e","#161b22","#30363d"))
+    fg, bg, bd = M.get(sig, ("#8b949e","#161b22","#30363d"))
     return (f'<span style="background:{bg};color:{fg};border:1px solid {bd};border-radius:12px;'
             f'padding:2px 10px;font-size:11px;font-weight:700;white-space:nowrap">{sig}</span>')
 
 def _darvas_badge(status):
-    colors = {
-        "BREAKOUT":  ("#26d07c","#0d2615","#26d07c44"),
-        "INSIDE":    ("#f0b429","#1a1200","#f0b42944"),
-        "BREAKDOWN": ("#ff6b6b","#200808","#ff6b6b44"),
-        "FORMING":   ("#8b949e","#161b22","#30363d"),
-        "N/A":       ("#555","#161b22","#333"),
-    }
-    fg, bg, bd = colors.get(status, ("#555","#161b22","#333"))
-    label = {"BREAKOUT":"▲ OUT","INSIDE":"▬ IN","BREAKDOWN":"▼ DOWN","FORMING":"~ FORM","N/A":"—"}.get(status, status)
+    M = {"BREAKOUT":("#26d07c","#0d2615","#26d07c44"),
+         "INSIDE":  ("#f0b429","#1a1200","#f0b42944"),
+         "BREAKDOWN":("#ff6b6b","#200808","#ff6b6b44"),
+         "FORMING": ("#8b949e","#161b22","#30363d"),
+         "N/A":     ("#555","#161b22","#333")}
+    fg, bg, bd = M.get(status, ("#555","#161b22","#333"))
+    L = {"BREAKOUT":"▲OUT","INSIDE":"▬IN","BREAKDOWN":"▼DN","FORMING":"~FORM","N/A":"—"}
     return (f'<span style="background:{bg};color:{fg};border:1px solid {bd};border-radius:10px;'
-            f'padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap">{label}</span>')
+            f'padding:2px 7px;font-size:10px;font-weight:700;white-space:nowrap">{L.get(status,status)}</span>')
+
+def _blast_badge(is_blast, reasons):
+    if not is_blast:
+        return '<span style="color:#333;font-size:12px">—</span>'
+    tip = " | ".join(reasons)
+    return (f'<span title="{tip}" style="background:#1a0900;color:#ff8c00;border:1px solid #ff8c0066;'
+            f'border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;'
+            f'cursor:help;white-space:nowrap">💥 BLAST</span>')
+
+def _sr_mini(levels, color, label):
+    if not levels:
+        return f'<span style="color:#555">—</span>'
+    vals = " · ".join(f"₹{v:,.0f}" for v in levels[-3:])
+    return f'<span style="color:{color};font-size:11px">{vals}</span>'
 
 def _trade_table(trades):
     if not trades:
-        return '<p style="color:#8b949e;font-size:12px;margin-top:12px">No completed backtest trades found.</p>'
+        return '<p style="color:#8b949e;font-size:12px;margin-top:12px">No completed backtest trades.</p>'
     rows = []
     for t in trades[-10:]:
         rc = "#26d07c" if t["return_pct"] > 0 else "#ff6b6b"
         rows.append(
-            f'<tr>'
-            f'<td>{t["entry_date"]}</td>'
-            f'<td>{_signal_badge(t["signal"])}</td>'
-            f'<td style="text-align:right">₹{t["entry"]}</td>'
-            f'<td>{t.get("exit_date","Open")}</td>'
+            f'<tr><td>{t["entry_date"]}</td><td>{_signal_badge(t["signal"])}</td>'
+            f'<td style="text-align:right">₹{t["entry"]}</td><td>{t.get("exit_date","Open")}</td>'
             f'<td style="text-align:right">₹{t.get("exit_price","—")}</td>'
-            f'<td style="text-align:right;color:{rc};font-weight:700">'
-            f'{"+" if t["return_pct"]>0 else ""}{t["return_pct"]}%</td>'
-            f'<td style="text-align:right;color:#8b949e">{t.get("days","—")}d</td>'
-            f'</tr>'
-        )
-    return (
-        '<table style="width:100%;border-collapse:collapse;font-size:11.5px">'
-        '<tr style="color:#8b949e;font-size:10px">'
-        '<th style="text-align:left;padding:4px 8px">Entry Date</th>'
-        '<th style="text-align:left;padding:4px 8px">Signal</th>'
-        '<th style="text-align:right;padding:4px 8px">Entry ₹</th>'
-        '<th style="text-align:left;padding:4px 8px">Exit Date</th>'
-        '<th style="text-align:right;padding:4px 8px">Exit ₹</th>'
-        '<th style="text-align:right;padding:4px 8px">Return</th>'
-        '<th style="text-align:right;padding:4px 8px">Days</th>'
-        '</tr>' + "".join(rows) + '</table>'
-    )
+            f'<td style="text-align:right;color:{rc};font-weight:700">{"+" if t["return_pct"]>0 else ""}{t["return_pct"]}%</td>'
+            f'<td style="text-align:right;color:#8b949e">{t.get("days","—")}d</td></tr>')
+    return ('<table style="width:100%;border-collapse:collapse;font-size:11.5px">'
+            '<tr style="color:#8b949e;font-size:10px">'
+            '<th style="text-align:left;padding:4px 8px">Entry</th>'
+            '<th style="text-align:left;padding:4px 8px">Signal</th>'
+            '<th style="text-align:right;padding:4px 8px">Entry ₹</th>'
+            '<th style="text-align:left;padding:4px 8px">Exit</th>'
+            '<th style="text-align:right;padding:4px 8px">Exit ₹</th>'
+            '<th style="text-align:right;padding:4px 8px">Return</th>'
+            '<th style="text-align:right;padding:4px 8px">Days</th></tr>'
+            + "".join(rows) + '</table>')
 
-def _darvas_detail_card(tf, dv):
-    top    = f"₹{dv['top']:,.1f}"    if dv["top"]    else "—"
-    bottom = f"₹{dv['bottom']:,.1f}" if dv["bottom"] else "—"
-    width  = f"{dv['width_pct']}%"   if dv["width_pct"] else "—"
-    status = dv["status"]
-    status_col = {"BREAKOUT":"#26d07c","BREAKDOWN":"#ff6b6b","INSIDE":"#f0b429",
-                  "FORMING":"#8b949e","N/A":"#555"}.get(status,"#8b949e")
-    tf_icon = {"Daily":"📅","Weekly":"📆","Monthly":"🗓️"}.get(tf,"📊")
-    return (
-        f'<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;min-width:160px">'
-        f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">'
-        f'{tf_icon} {tf} Darvas</div>'
-        f'<div style="color:{status_col};font-size:13px;font-weight:700;margin-bottom:6px">{status}</div>'
-        f'<div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e;margin-bottom:2px">'
-        f'<span>Box Top:</span><span style="color:#e6edf3;font-weight:600">{top}</span></div>'
-        f'<div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e;margin-bottom:2px">'
-        f'<span>Box Bottom:</span><span style="color:#e6edf3;font-weight:600">{bottom}</span></div>'
-        f'<div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e">'
-        f'<span>Width:</span><span style="color:#c084fc;font-weight:600">{width}</span></div>'
-        f'</div>'
-    )
+def _darvas_card(tf, dv):
+    top    = f"₹{dv['top']:,.1f}"    if dv.get("top")    else "—"
+    bottom = f"₹{dv['bottom']:,.1f}" if dv.get("bottom") else "—"
+    width  = f"{dv['width_pct']}%"   if dv.get("width_pct") else "—"
+    sc = {"BREAKOUT":"#26d07c","BREAKDOWN":"#ff6b6b","INSIDE":"#f0b429",
+          "FORMING":"#8b949e","N/A":"#555"}.get(dv.get("status","N/A"),"#8b949e")
+    ico = {"Daily":"📅","Weekly":"📆","Monthly":"🗓️"}.get(tf,"📊")
+    return (f'<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px;min-width:145px">'
+            f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase;margin-bottom:4px">{ico} {tf} Darvas</div>'
+            f'<div style="color:{sc};font-size:12px;font-weight:700;margin-bottom:4px">{dv.get("status","N/A")}</div>'
+            f'<div style="font-size:10px;color:#8b949e">Top: <b style="color:#e6edf3">{top}</b></div>'
+            f'<div style="font-size:10px;color:#8b949e">Bot: <b style="color:#e6edf3">{bottom}</b></div>'
+            f'<div style="font-size:10px;color:#8b949e">Width: <b style="color:#c084fc">{width}</b></div>'
+            f'</div>')
 
-# ── Build HTML row ────────────────────────────────────────────────────────────
+# ── HTML row builder ──────────────────────────────────────────────────────────
 def build_row(idx, r):
-    sym   = r["symbol"]
-    name  = r["name"]
-    close = r["close"]
-    fib   = r["fib"]
-    bt    = r["bt"]
+    sym    = r["symbol"]
+    name   = r["name"]
+    seg    = r["segment"]
+    fib    = r["fib"]
+    bt     = r["bt"]
     darvas = r["darvas"]
+    is_blast = r["is_blast"]
+    blast_reasons = r.get("blast_reasons", [])
 
     ath_col = "#26d07c" if r["is_ath"] else ("#f0b429" if r["ath_pct"] >= -5 else "#ff6b6b")
-    ath_str = ("🔥 ATH" if r["is_ath"] else f'{r["ath_pct"]}%')
-
-    drsi_str = f'{r["drsi"]}' if r["drsi"] else "—"
-    wrsi_str = f'{r["wrsi"]}' if r["wrsi"] else "—"
-    mrsi_str = f'{r["mrsi"]}' if r["mrsi"] else "—"
-    macd_str = f'{r["macd"]:.3f}' if r["macd"] is not None else "—"
+    ath_str = "🔥 ATH" if r["is_ath"] else f'{r["ath_pct"]}%'
     macd_col = "#26d07c" if (r["macd"] and r["macd"] > 0) else "#ff6b6b"
+    macd_str = f'{r["macd"]:.3f}' if r["macd"] is not None else "—"
 
-    blast_cell = ('💥' if r["blast_off"] else '—')
+    d_dv = darvas.get("Daily",  {})
+    w_dv = darvas.get("Weekly", {})
+    m_dv = darvas.get("Monthly",{})
 
-    d_dv = darvas.get("Daily",   {})
-    w_dv = darvas.get("Weekly",  {})
-    m_dv = darvas.get("Monthly", {})
+    bt_trades  = str(bt.get("trades","—"))
+    bt_wr      = f'{bt["win_rate"]}%' if "win_rate" in bt else "—"
+    bt_avg     = (f'+{bt["avg_ret"]}%' if bt.get("avg_ret",0)>0 else f'{bt.get("avg_ret","—")}%') if "avg_ret" in bt else "—"
+    bt_best    = f'+{bt["best_ret"]}%' if "best_ret" in bt else "—"
+    bt_avg_col = "#26d07c" if bt.get("avg_ret",0) > 0 else "#ff6b6b"
 
-    trades_str  = str(bt.get("trades","—"))
-    winrate_str = f'{bt.get("win_rate","—")}%' if "win_rate" in bt else "—"
-    avgret_str  = (f'+{bt["avg_ret"]}%' if bt.get("avg_ret",0)>0 else f'{bt.get("avg_ret","—")}%') if "avg_ret" in bt else "—"
-    bestret_str = f'+{bt["best_ret"]}%' if "best_ret" in bt else "—"
-    avgret_col  = "#26d07c" if bt.get("avg_ret",0) > 0 else "#ff6b6b"
+    seg_badge = (f'<span style="background:#0a1a0a;color:#26d07c;border:1px solid #26d07c44;'
+                 f'border-radius:8px;padding:1px 6px;font-size:9px;font-weight:700">CASH</span>'
+                 if seg == "CASH" else
+                 f'<span style="background:#1a1000;color:#f0b429;border:1px solid #f0b42944;'
+                 f'border-radius:8px;padding:1px 6px;font-size:9px;font-weight:700">SME</span>')
+
+    # Chart link
+    chart_link = ""
+    if r.get("chart") and os.path.exists(r["chart"]):
+        chart_url = f'/charts/{sym}_mb.png'
+        chart_link = (f'<a href="{chart_url}" target="_blank" '
+                      f'style="color:#60a5fa;font-size:11px;text-decoration:none">📈 Chart</a>')
+
+    # S/R summary for detail row
+    w_r_str = " · ".join(f"₹{v:,.0f}" for v in r.get("w_resist",[])[-3:]) or "—"
+    w_s_str = " · ".join(f"₹{v:,.0f}" for v in r.get("w_support",[])[:3]) or "—"
+    m_r_str = " · ".join(f"₹{v:,.0f}" for v in r.get("m_resist",[])[-3:]) or "—"
+    m_s_str = " · ".join(f"₹{v:,.0f}" for v in r.get("m_support",[])[:3]) or "—"
+
+    wch = r.get("w_channel") or {}
+    mch = r.get("m_channel") or {}
+
+    blast_detail = ""
+    if is_blast and blast_reasons:
+        blast_detail = (
+            f'<div style="background:#1a0900;border:1px solid #ff8c0044;border-radius:8px;'
+            f'padding:10px 14px;margin-bottom:12px">'
+            f'<div style="color:#ff8c00;font-size:12px;font-weight:700;margin-bottom:4px">💥 Daily Blast Triggers</div>'
+            + "".join(f'<div style="color:#fbbf24;font-size:11px">• {r}</div>' for r in blast_reasons)
+            + f'</div>'
+        )
 
     detail_id = f"d{idx}"
-
-    # Detail section HTML
     detail_html = (
-        f'<tr id="{detail_id}" style="display:none"><td colspan="23" style="background:#010409;padding:20px 24px">'
-        # Fib targets row
-        f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px">'
-        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px">'
+        f'<tr id="{detail_id}" style="display:none">'
+        f'<td colspan="26" style="background:#010409;padding:18px 22px">'
+        + blast_detail +
+        f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">'
+        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px">'
         f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase">Swing Low</div>'
-        f'<div style="color:#e6edf3;font-size:16px;font-weight:700">₹{fib["low"]:,.1f}</div></div>'
-        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px">'
+        f'<div style="color:#e6edf3;font-size:15px;font-weight:700">₹{fib["low"]:,.1f}</div></div>'
+        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px">'
         f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase">Swing High</div>'
-        f'<div style="color:#e6edf3;font-size:16px;font-weight:700">₹{fib["high"]:,.1f}</div></div>'
-        f'<div style="background:#002d1a;border:1px solid #26d07c44;border-radius:8px;padding:12px">'
-        f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase">Fib 1.618x Target</div>'
-        f'<div style="color:#26d07c;font-size:16px;font-weight:700">₹{fib["f1618"]:,.1f}</div></div>'
-        f'<div style="background:#2a1200;border:1px solid #dc262644;border-radius:8px;padding:12px">'
-        f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase">Fib 4.236x Target</div>'
-        f'<div style="color:#dc2626;font-size:16px;font-weight:700">₹{fib["f4236"]:,.1f}</div></div>'
+        f'<div style="color:#e6edf3;font-size:15px;font-weight:700">₹{fib["high"]:,.1f}</div></div>'
+        f'<div style="background:#002d1a;border:1px solid #26d07c44;border-radius:8px;padding:10px">'
+        f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase">Fib 1.618x</div>'
+        f'<div style="color:#26d07c;font-size:15px;font-weight:700">₹{fib["f1618"]:,.1f}</div></div>'
+        f'<div style="background:#2a1200;border:1px solid #dc262644;border-radius:8px;padding:10px">'
+        f'<div style="color:#8b949e;font-size:10px;text-transform:uppercase">Fib 4.236x</div>'
+        f'<div style="color:#dc2626;font-size:15px;font-weight:700">₹{fib["f4236"]:,.1f}</div></div>'
         f'</div>'
-        # ── Darvas Box detail ──
-        f'<div style="margin-bottom:16px">'
-        f'<h4 style="color:#60a5fa;font-size:12px;margin-bottom:10px">📦 Darvas Box Analysis — Daily · Weekly · Monthly</h4>'
-        f'<div style="display:flex;gap:12px;flex-wrap:wrap">'
-        + _darvas_detail_card("Daily",   d_dv)
-        + _darvas_detail_card("Weekly",  w_dv)
-        + _darvas_detail_card("Monthly", m_dv)
+        # S/R levels
+        f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">'
+        f'<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px">'
+        f'<div style="color:#60a5fa;font-size:11px;font-weight:700;margin-bottom:4px">📆 Weekly S/R</div>'
+        f'<div style="font-size:11px;color:#8b949e">Resistance: <span style="color:#ff6b6b">{w_r_str}</span></div>'
+        f'<div style="font-size:11px;color:#8b949e">Support: <span style="color:#26d07c">{w_s_str}</span></div>'
+        + (f'<div style="font-size:10px;color:#8b949e;margin-top:4px">Channel: '
+           f'<span style="color:#60a5fa">₹{wch["last_lower"]:,.0f} – ₹{wch["last_upper"]:,.0f}</span></div>'
+           if wch else "")
+        + f'</div>'
+        f'<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px">'
+        f'<div style="color:#c084fc;font-size:11px;font-weight:700;margin-bottom:4px">🗓️ Monthly S/R</div>'
+        f'<div style="font-size:11px;color:#8b949e">Resistance: <span style="color:#ff6b6b">{m_r_str}</span></div>'
+        f'<div style="font-size:11px;color:#8b949e">Support: <span style="color:#26d07c">{m_s_str}</span></div>'
+        + (f'<div style="font-size:10px;color:#8b949e;margin-top:4px">Channel: '
+           f'<span style="color:#c084fc">₹{mch["last_lower"]:,.0f} – ₹{mch["last_upper"]:,.0f}</span></div>'
+           if mch else "")
         + f'</div></div>'
-        # Backtest trades
-        f'<div><h4 style="color:#8b949e;font-size:12px;margin-bottom:8px">📋 Backtest Trades (last 10)</h4>'
+        # Darvas cards
+        f'<div style="margin-bottom:14px">'
+        f'<div style="color:#60a5fa;font-size:11px;font-weight:700;margin-bottom:8px">📦 Darvas Box</div>'
+        f'<div style="display:flex;gap:10px;flex-wrap:wrap">'
+        + _darvas_card("Daily", d_dv) + _darvas_card("Weekly", w_dv) + _darvas_card("Monthly", m_dv)
+        + f'</div></div>'
+        # Backtest
+        f'<div><div style="color:#8b949e;font-size:11px;font-weight:700;margin-bottom:6px">📋 Backtest Trades (last 10)</div>'
         + _trade_table(r["trades"])
         + f'</div>'
         f'</td></tr>'
     )
 
+    blast_data = "1" if is_blast else "0"
+
     row_html = (
         f'<tr data-name="{name.lower()}" data-score="{r["score"]}" '
         f'data-mrsi="{r["mrsi"] or 0}" data-wrsi="{r["wrsi"] or 0}" '
-        f'data-drsi="{r["drsi"] or 0}" data-ath="{r["ath_pct"]}">'
+        f'data-drsi="{r["drsi"] or 0}" data-ath="{r["ath_pct"]}" '
+        f'data-blast="{blast_data}" data-seg="{seg}">'
         f'<td>{idx}</td>'
-        f'<td><b style="color:#e6edf3">{sym}</b><br>'
-        f'<span style="color:#8b949e;font-size:11px">{name[:30]}</span></td>'
-        f'<td style="text-align:right">₹{close:,.2f}</td>'
+        f'<td><b style="color:#e6edf3">{sym}</b> {seg_badge}<br>'
+        f'<span style="color:#8b949e;font-size:11px">{name[:28]}</span></td>'
+        f'<td style="text-align:right">₹{r["close"]:,.2f}</td>'
         f'<td style="text-align:right;color:{ath_col}">{ath_str}</td>'
-        f'<td style="text-align:right;color:{_rsi_color(r["drsi"])}">{drsi_str}</td>'
-        f'<td style="text-align:right;color:{_rsi_color(r["wrsi"])}">{wrsi_str}</td>'
-        f'<td style="text-align:right;color:{_rsi_color(r["mrsi"])}">{mrsi_str}</td>'
+        f'<td style="text-align:right;color:{_rsi_color(r["drsi"])}">{r["drsi"] or "—"}</td>'
+        f'<td style="text-align:right;color:{_rsi_color(r["wrsi"])}">{r["wrsi"] or "—"}</td>'
+        f'<td style="text-align:right;color:{_rsi_color(r["mrsi"])}">{r["mrsi"] or "—"}</td>'
         f'<td style="text-align:right;color:{macd_col}">{macd_str}</td>'
-        # Darvas Box columns (Daily / Weekly / Monthly)
+        # Darvas
         f'<td style="text-align:center">{_darvas_badge(d_dv.get("status","N/A"))}</td>'
         f'<td style="text-align:center">{_darvas_badge(w_dv.get("status","N/A"))}</td>'
         f'<td style="text-align:center">{_darvas_badge(m_dv.get("status","N/A"))}</td>'
-        # Fib columns
+        # ── Daily Blast column ──
+        f'<td style="text-align:center" data-blast="{blast_data}">{_blast_badge(is_blast, blast_reasons)}</td>'
+        # Fib
         f'<td style="text-align:right;color:#8b949e">₹{fib["f0618"]:,.0f}</td>'
         f'<td style="text-align:right;color:#26d07c">₹{fib["f1618"]:,.0f}</td>'
         f'<td style="text-align:right;color:#f0b429">₹{fib["f2618"]:,.0f}</td>'
@@ -556,22 +817,22 @@ def build_row(idx, r):
         # Signal / Score
         f'<td style="text-align:left">{_signal_badge(r["signal"])}</td>'
         f'<td style="text-align:right;color:#00d4ff;font-weight:700">{r["score"]}</td>'
-        f'<td style="text-align:center;font-size:16px">{blast_cell}</td>'
-        # Backtest stats
-        f'<td style="text-align:right;color:#8b949e">{trades_str}</td>'
-        f'<td style="text-align:right;color:#8b949e">{winrate_str}</td>'
-        f'<td style="text-align:right;color:{avgret_col}">{avgret_str}</td>'
-        f'<td style="text-align:right;color:#26d07c">{bestret_str}</td>'
-        # Expand
+        # Backtest
+        f'<td style="text-align:right;color:#8b949e">{bt_trades}</td>'
+        f'<td style="text-align:right;color:#8b949e">{bt_wr}</td>'
+        f'<td style="text-align:right;color:{bt_avg_col}">{bt_avg}</td>'
+        f'<td style="text-align:right;color:#26d07c">{bt_best}</td>'
+        # Chart + Detail
+        f'<td>{chart_link}</td>'
         f'<td><button onclick="toggleDetail(\'{detail_id}\')" '
-        f'style="background:#161b22;border:1px solid #30363d;color:#8b949e;border-radius:8px;'
-        f'padding:3px 10px;cursor:pointer;font-size:11px">▼ Detail</button></td>'
+        f'style="background:#161b22;border:1px solid #30363d;color:#8b949e;border-radius:6px;'
+        f'padding:3px 8px;cursor:pointer;font-size:11px">▼</button></td>'
         f'</tr>'
         + detail_html
     )
     return row_html
 
-# ── HTML Report ───────────────────────────────────────────────────────────────
+# ── HTML template ─────────────────────────────────────────────────────────────
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -579,59 +840,65 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Multibagger Report — {run_ts}</title>
 <style>
-:root {{
-  --bg:#0d1117; --card:#161b22; --border:#21262d; --text:#e6edf3;
-  --sub:#8b949e; --cyan:#00d4ff; --green:#26d07c; --gold:#f0b429;
-  --red:#ff6b6b; --purple:#c084fc; --blue:#60a5fa;
-}}
+:root{{--bg:#0d1117;--card:#161b22;--border:#21262d;--text:#e6edf3;
+       --sub:#8b949e;--cyan:#00d4ff;--green:#26d07c;--gold:#f0b429;
+       --red:#ff6b6b;--purple:#c084fc;--blue:#60a5fa;--blast:#ff8c00}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:13px}}
 .header{{background:#010409;border-bottom:2px solid var(--border);padding:18px 24px 14px}}
-.header h1{{font-size:21px;font-weight:700;color:var(--cyan);letter-spacing:1px}}
-.subtitle{{color:var(--sub);font-size:11.5px;margin-top:4px}}
+.header h1{{font-size:20px;font-weight:700;color:var(--cyan);letter-spacing:1px}}
+.subtitle{{color:var(--sub);font-size:11px;margin-top:4px}}
 .nav-links{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}}
-.nav-link{{display:inline-flex;align-items:center;gap:5px;background:var(--card);border:1px solid var(--border);
-           color:var(--text);border-radius:20px;padding:4px 14px;font-size:11.5px;font-weight:600;
-           text-decoration:none;transition:all .15s}}
+.nav-link{{display:inline-flex;align-items:center;gap:5px;background:var(--card);
+           border:1px solid var(--border);color:var(--text);border-radius:20px;
+           padding:4px 14px;font-size:11.5px;font-weight:600;text-decoration:none;transition:all .15s}}
 .nav-link:hover{{border-color:var(--cyan);color:var(--cyan)}}
 .nav-link.active{{background:var(--cyan);color:#000;border-color:var(--cyan)}}
-.stats{{display:flex;gap:10px;flex-wrap:wrap;padding:16px 24px}}
-.stat{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 18px;min-width:110px}}
-.stat .val{{font-size:24px;font-weight:700}}
+.stats{{display:flex;gap:10px;flex-wrap:wrap;padding:14px 24px}}
+.stat{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 16px;min-width:105px}}
+.stat .val{{font-size:22px;font-weight:700}}
 .stat .lbl{{font-size:10px;color:var(--sub);margin-top:2px;text-transform:uppercase;letter-spacing:.5px}}
-.strategy-box{{margin:0 24px 16px;background:#0a1628;border:1px solid #1e3a5f;border-radius:10px;padding:14px 18px}}
-.strategy-box h3{{color:var(--cyan);font-size:13px;margin-bottom:8px}}
-.strategy-box ul{{color:var(--sub);font-size:11.5px;line-height:1.8;padding-left:18px}}
-.strategy-box li span{{color:var(--text)}}
-.darvas-box{{margin:0 24px 16px;background:#060d1a;border:1px solid #1a3055;border-radius:10px;padding:14px 18px}}
-.darvas-box h3{{color:var(--blue);font-size:13px;margin-bottom:8px}}
-.darvas-box ul{{color:var(--sub);font-size:11.5px;line-height:1.8;padding-left:18px}}
-.darvas-box li span{{color:var(--text)}}
-.filter-bar{{padding:10px 24px;background:#010409;border-bottom:1px solid var(--border);
+.info-box{{margin:0 24px 14px;border-radius:10px;padding:12px 16px}}
+.info-box.strategy{{background:#0a1628;border:1px solid #1e3a5f}}
+.info-box.darvas{{background:#060d1a;border:1px solid #1a3055}}
+.info-box.blast-info{{background:#0d0600;border:1px solid #ff8c0033}}
+.info-box h3{{font-size:12px;margin-bottom:6px}}
+.info-box ul{{color:var(--sub);font-size:11px;line-height:1.75;padding-left:16px}}
+.info-box li span{{color:var(--text)}}
+.filter-bar{{padding:9px 24px;background:#010409;border-bottom:1px solid var(--border);
              position:sticky;top:0;z-index:1000;display:flex;gap:8px;flex-wrap:wrap;align-items:center}}
-.filter-bar input{{flex:1;min-width:180px;max-width:260px;background:var(--card);border:1px solid var(--border);
-                   color:var(--text);border-radius:20px;padding:5px 14px;font-size:12px;outline:none}}
+.filter-bar input{{flex:1;min-width:160px;max-width:220px;background:var(--card);
+                   border:1px solid var(--border);color:var(--text);border-radius:20px;
+                   padding:5px 14px;font-size:12px;outline:none}}
 .filter-bar input:focus{{border-color:var(--cyan)}}
-.sort-btn{{background:var(--card);border:1px solid var(--border);color:var(--sub);border-radius:20px;
-           padding:4px 12px;cursor:pointer;font-size:11.5px;transition:all .15s;font-weight:600}}
-.sort-btn:hover,.sort-btn.active{{background:var(--cyan);color:#000;border-color:var(--cyan)}}
+.fbtn{{background:var(--card);border:1px solid var(--border);color:var(--sub);border-radius:20px;
+        padding:4px 12px;cursor:pointer;font-size:11.5px;transition:all .15s;font-weight:600}}
+.fbtn:hover,.fbtn.active{{background:var(--cyan);color:#000;border-color:var(--cyan)}}
+.fbtn.blast-btn{{border-color:#ff8c0066;color:#ff8c00}}
+.fbtn.blast-btn.active{{background:#ff8c00;color:#000;border-color:#ff8c00}}
+.fbtn.sme-btn{{border-color:#f0b42966;color:#f0b429}}
+.fbtn.sme-btn.active{{background:#f0b429;color:#000;border-color:#f0b429}}
 table{{width:100%;border-collapse:collapse}}
-th{{background:#010409;padding:9px 10px;text-align:right;font-size:11px;color:var(--sub);
-    text-transform:uppercase;letter-spacing:.5px;cursor:pointer;white-space:nowrap;border-bottom:1px solid var(--border)}}
+th{{background:#010409;padding:8px 9px;text-align:right;font-size:10.5px;color:var(--sub);
+     text-transform:uppercase;letter-spacing:.4px;cursor:pointer;white-space:nowrap;
+     border-bottom:1px solid var(--border)}}
 th:hover{{color:var(--cyan)}}
 th.asc::after{{content:" ▲"}}th.desc::after{{content:" ▼"}}
-th:first-child,th:nth-child(2),th:last-child{{text-align:left}}
-td{{padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}}
-tr:hover td{{background:#161b2288}}
-.footer{{text-align:center;padding:24px;color:var(--sub);font-size:11px;border-top:1px solid var(--border);margin-top:20px}}
+th:first-child,th:nth-child(2),th:last-child,th:nth-last-child(2){{text-align:left}}
+td{{padding:8px 9px;border-bottom:1px solid var(--border);vertical-align:middle}}
+tr:hover td{{background:#161b2266}}
+.blast-row td{{background:#1a090022!important}}
+.blast-row:hover td{{background:#1a090044!important}}
+.footer{{text-align:center;padding:20px;color:var(--sub);font-size:11px;
+          border-top:1px solid var(--border);margin-top:16px}}
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>🏆 Multibagger Report — NSE Strong Momentum Scanner</h1>
+  <h1>🏆 Multibagger Report — NSE Cash + SME Scanner v3.0</h1>
   <div class="subtitle">
-    Strategy: ATH Breakout + Monthly RSI&gt;70 + Ultra-Slow MACD(34,1000,20) + Fibonacci + 📦 Darvas Box (D/W/M)
-    &nbsp;|&nbsp; {run_ts} IST &nbsp;|&nbsp; Multi-Timeframe: Daily · Weekly · Monthly
+    ATH + MTF RSI + MACD(34,1000,20) + Fibonacci + Darvas Box + 📦 S/R + Trend Channel + 💥 Daily Blast
+    &nbsp;|&nbsp; {run_ts} IST &nbsp;|&nbsp; {n_cash} Cash · {n_sme} SME stocks
   </div>
   <div class="nav-links">
     <a class="nav-link" href="/">📊 Full RSI Report</a>
@@ -642,75 +909,74 @@ tr:hover td{{background:#161b2288}}
 </div>
 
 <div class="stats">
-  <div class="stat"><div class="val" style="color:var(--cyan)">{n_total}</div><div class="lbl">Stocks Analysed</div></div>
+  <div class="stat"><div class="val" style="color:var(--cyan)">{n_total}</div><div class="lbl">Analysed</div></div>
+  <div class="stat"><div class="val" style="color:var(--blast)">{n_blast}</div><div class="lbl">💥 Daily Blast</div></div>
   <div class="stat"><div class="val" style="color:var(--green)">{n_ath}</div><div class="lbl">ATH Breakouts</div></div>
   <div class="stat"><div class="val" style="color:var(--red)">{n_mrsi}</div><div class="lbl">M-RSI &gt; 70</div></div>
+  <div class="stat"><div class="val" style="color:var(--blue)">{n_darvas}</div><div class="lbl">Darvas Breakout</div></div>
   <div class="stat"><div class="val" style="color:var(--gold)">{n_strong}</div><div class="lbl">Strong Signals</div></div>
-  <div class="stat"><div class="val" style="color:var(--blue)">{n_darvas_out}</div><div class="lbl">Darvas Breakouts</div></div>
   <div class="stat"><div class="val" style="color:var(--purple)">{avg_score:.1f}</div><div class="lbl">Avg Score</div></div>
 </div>
 
-<div class="strategy-box">
-  <h3>📌 Multibagger Strategy — How to Ride 5x–10x Trends</h3>
+<div class="info-box blast-info">
+  <h3 style="color:var(--blast)">💥 Daily Blast — What It Means</h3>
   <ul>
-    <li><span>🚀 STRONG BUY</span> — ATH Breakout (new all-time high) AND Monthly RSI&gt;70: Highest conviction signal for mega-trends</li>
-    <li><span>🌊 MACD MEGA BUY</span> — Ultra-slow MACD(34,1000,20) crosses above zero + M-RSI&gt;60: Structural trend confirmation</li>
-    <li><span>✅ BUY</span> — Daily RSI crosses 60 + Weekly RSI&gt;55 + Volume surge: Fresh momentum entry in established uptrend</li>
-    <li><span>🔥 VOL BUY</span> — Volume &gt;2.5x average + price above all EMAs: Institutional accumulation signal</li>
-    <li><span>💜 M-RSI BUY</span> — Monthly RSI freshly crosses 70 + price above 50 EMA: Monthly momentum ignition</li>
-    <li><span>💥 DARVAS BLAST</span> — Breakout confirmed on ALL 3 timeframes (Daily + Weekly + Monthly): Ultra-high conviction</li>
-    <li><span>Fib Targets</span> — 0.618x (conservative), 1.618x (standard), 2.618x (aggressive), 4.236x (moonshot 5x–10x)</li>
+    <li><span>Trigger:</span> Daily close broke above a key Weekly or Monthly Resistance level, OR above the Trend Channel upper band</li>
+    <li><span>Significance:</span> Strong breakout with institutional interest — price has escaped a major supply zone</li>
+    <li><span>Filter:</span> Click "💥 Only Blast" button below to show only breakout stocks · Rows highlighted in orange</li>
+    <li><span>Confidence:</span> Higher when BOTH weekly + monthly S/R are broken simultaneously</li>
   </ul>
 </div>
 
-<div class="darvas-box">
-  <h3>📦 Darvas Box Strategy — Breakout Box Trading</h3>
+<div class="info-box darvas">
+  <h3 style="color:var(--blue)">📦 Darvas Box + S/R + Trend Channel</h3>
   <ul>
-    <li><span>How it works:</span> A Darvas Box forms when a price high is NOT exceeded for 3 consecutive bars (top confirmed), then a low holds for 3 bars (bottom confirmed)</li>
-    <li><span>▲ BREAKOUT</span> — Price closes above the box top: Strong entry signal, momentum continuation expected</li>
-    <li><span>▬ INSIDE</span> — Price is within the box: Coiling/consolidation phase, watch for breakout</li>
-    <li><span>▼ BREAKDOWN</span> — Price closes below the box bottom: Caution, downward pressure</li>
-    <li><span>💥 BLAST</span> — Breakout confirmed on Daily + Weekly + Monthly simultaneously: Mega-momentum signal</li>
-    <li><span>Timeframes:</span> Daily boxes capture short-term swings; Weekly boxes show medium-term structure; Monthly boxes reveal the biggest institutional accumulation zones</li>
+    <li><span>Support / Resistance:</span> Pivot swing highs (resistance) and lows (support) on weekly &amp; monthly charts — dashed lines on chart</li>
+    <li><span>Trend Channel:</span> Linear regression ±2σ band on weekly (52 bars) and monthly (24 bars) — shaded area on chart</li>
+    <li><span>Darvas Box:</span> High confirmed when not exceeded for 3 consecutive bars · ▲OUT=breakout, ▬IN=inside box, ▼DN=breakdown</li>
   </ul>
 </div>
 
 <div class="filter-bar">
-  <input type="text" id="searchInput" placeholder="🔍 Search ticker or company…" oninput="filterTable()">
-  <button class="sort-btn" onclick="sortBy('score')">Sort: Score</button>
-  <button class="sort-btn" onclick="sortBy('mrsi')">Sort: M-RSI</button>
-  <button class="sort-btn" onclick="sortBy('ath')">Sort: ATH%</button>
-  <button class="sort-btn" onclick="sortBy('wrsi')">Sort: W-RSI</button>
-  <button class="sort-btn" onclick="sortBy('drsi')">Sort: D-RSI</button>
+  <input type="text" id="searchInput" placeholder="🔍 Search ticker…" oninput="applyFilters()">
+  <button class="fbtn blast-btn" id="blastBtn" onclick="toggleBlast()">💥 Only Blast</button>
+  <button class="fbtn sme-btn"   id="smeBtn"   onclick="toggleSeg('SME')">SME Only</button>
+  <button class="fbtn"           id="cashBtn"  onclick="toggleSeg('CASH')">Cash Only</button>
+  <button class="fbtn" onclick="clearFilters()">✕ Clear</button>
+  <button class="fbtn" onclick="sortByField('score')">Score ↓</button>
+  <button class="fbtn" onclick="sortByField('mrsi')">M-RSI ↓</button>
+  <button class="fbtn" onclick="sortByField('ath')">ATH% ↓</button>
+  <button class="fbtn" onclick="sortByField('drsi')">D-RSI ↓</button>
   <span id="countInfo" style="color:var(--sub);font-size:11px;margin-left:4px"></span>
 </div>
 
 <table id="mainTable">
 <thead>
 <tr>
-  <th onclick="thSort(0)">#</th>
-  <th onclick="thSort(1)" style="text-align:left">Ticker / Company</th>
-  <th onclick="thSort(2)">Close</th>
-  <th onclick="thSort(3)">ATH%</th>
-  <th onclick="thSort(4)">D-RSI</th>
-  <th onclick="thSort(5)">W-RSI</th>
-  <th onclick="thSort(6)">M-RSI</th>
-  <th onclick="thSort(7)">MACD</th>
-  <th onclick="thSort(8)" style="color:#60a5fa">📦 D-Box</th>
-  <th onclick="thSort(9)" style="color:#60a5fa">📆 W-Box</th>
-  <th onclick="thSort(10)" style="color:#60a5fa">🗓️ M-Box</th>
-  <th onclick="thSort(11)">Fib 0.618x</th>
-  <th onclick="thSort(12)">Fib 1.618x</th>
-  <th onclick="thSort(13)">Fib 2.618x</th>
-  <th onclick="thSort(14)">Fib 4.236x</th>
-  <th onclick="thSort(15)" style="text-align:left">Signal</th>
-  <th onclick="thSort(16)">Score</th>
-  <th onclick="thSort(17)" style="color:#ff8c00">💥 Blast</th>
-  <th onclick="thSort(18)">Trades</th>
-  <th onclick="thSort(19)">Win Rate</th>
-  <th onclick="thSort(20)">Avg Ret</th>
-  <th onclick="thSort(21)">Best Ret</th>
-  <th style="text-align:left">Detail</th>
+  <th onclick="colSort(0)">#</th>
+  <th onclick="colSort(1)" style="text-align:left">Ticker / Name</th>
+  <th onclick="colSort(2)">Close</th>
+  <th onclick="colSort(3)">ATH%</th>
+  <th onclick="colSort(4)">D-RSI</th>
+  <th onclick="colSort(5)">W-RSI</th>
+  <th onclick="colSort(6)">M-RSI</th>
+  <th onclick="colSort(7)">MACD</th>
+  <th onclick="colSort(8)" style="color:#60a5fa">D-Box</th>
+  <th onclick="colSort(9)" style="color:#60a5fa">W-Box</th>
+  <th onclick="colSort(10)" style="color:#60a5fa">M-Box</th>
+  <th onclick="colSort(11)" style="color:var(--blast)">💥 Blast</th>
+  <th onclick="colSort(12)">Fib 0.618x</th>
+  <th onclick="colSort(13)">Fib 1.618x</th>
+  <th onclick="colSort(14)">Fib 2.618x</th>
+  <th onclick="colSort(15)">Fib 4.236x</th>
+  <th onclick="colSort(16)" style="text-align:left">Signal</th>
+  <th onclick="colSort(17)">Score</th>
+  <th onclick="colSort(18)">Trades</th>
+  <th onclick="colSort(19)">Win%</th>
+  <th onclick="colSort(20)">Avg Ret</th>
+  <th onclick="colSort(21)">Best</th>
+  <th style="text-align:left">Chart</th>
+  <th style="text-align:left">▼</th>
 </tr>
 </thead>
 <tbody id="tableBody">
@@ -719,143 +985,212 @@ tr:hover td{{background:#161b2288}}
 </table>
 
 <div class="footer">
-  Multibagger + Darvas Box Report v2.0 &nbsp;|&nbsp; {run_ts} &nbsp;|&nbsp;
-  <b>Not financial advice.</b> For educational purposes only.<br>
-  Strategy: ATH Breakout + M-RSI&gt;70 + Ultra-Slow MACD(34,1000,20) + Fibonacci Extensions + Darvas Box (Daily/Weekly/Monthly)
+  Multibagger + S/R + Trend Channel + Darvas + Daily Blast Report v3.0
+  &nbsp;|&nbsp; {run_ts} &nbsp;|&nbsp; <b>Not financial advice.</b> Educational use only.
 </div>
 
 <script>
-function toggleDetail(id){{
-  const el=document.getElementById(id);
-  el.style.display=el.style.display==='none'?'table-row':'none';
-}}
-function filterTable(){{
+let blastOnly=false, segFilter='ALL';
+
+function getRows(){{return[...document.querySelectorAll('#tableBody tr[data-name]')];}}
+
+function applyFilters(){{
   const q=document.getElementById('searchInput').value.toLowerCase();
-  const rows=document.querySelectorAll('#tableBody tr[data-name]');
-  let shown=0;
+  const rows=getRows(); let shown=0;
   rows.forEach(r=>{{
-    const match=r.dataset.name.toLowerCase().includes(q)||
-                r.querySelector('b').textContent.toLowerCase().includes(q);
-    r.style.display=match?'':'none';
-    const nextId=r.querySelector('button')?.getAttribute('onclick')?.match(/'(d\\d+)'/)?.[1];
-    if(nextId){{document.getElementById(nextId).style.display='none';}}
-    if(match)shown++;
+    const name=r.dataset.name||'';
+    const sym=r.querySelector('b')?.textContent.toLowerCase()||'';
+    const isBlast=r.dataset.blast==='1';
+    const seg=r.dataset.seg||'CASH';
+    const matchQ=!q||(name.includes(q)||sym.includes(q));
+    const matchBlast=!blastOnly||isBlast;
+    const matchSeg=segFilter==='ALL'||seg===segFilter;
+    const show=matchQ&&matchBlast&&matchSeg;
+    r.style.display=show?'':'none';
+    // hide detail row too
+    const detBtn=r.querySelector('button[onclick^="toggleDetail"]');
+    if(detBtn){{
+      const detId=detBtn.getAttribute('onclick').match(/'(d\\d+)'/)?.[1];
+      if(detId)document.getElementById(detId).style.display='none';
+    }}
+    if(show)shown++;
+    if(show&&isBlast)r.classList.add('blast-row');
+    else r.classList.remove('blast-row');
   }});
   document.getElementById('countInfo').textContent=`Showing ${{shown}} of {n_total}`;
 }}
-function sortBy(field){{
-  const rows=[...document.querySelectorAll('#tableBody tr[data-name]')];
+
+function toggleBlast(){{
+  blastOnly=!blastOnly;
+  document.getElementById('blastBtn').classList.toggle('active',blastOnly);
+  applyFilters();
+}}
+
+function toggleSeg(s){{
+  segFilter=segFilter===s?'ALL':s;
+  document.getElementById('smeBtn').classList.toggle('active',segFilter==='SME');
+  document.getElementById('cashBtn').classList.toggle('active',segFilter==='CASH');
+  applyFilters();
+}}
+
+function clearFilters(){{
+  blastOnly=false; segFilter='ALL';
+  document.getElementById('searchInput').value='';
+  document.getElementById('blastBtn').classList.remove('active');
+  document.getElementById('smeBtn').classList.remove('active');
+  document.getElementById('cashBtn').classList.remove('active');
+  applyFilters();
+}}
+
+function sortByField(field){{
   const map={{score:'score',mrsi:'mrsi',wrsi:'wrsi',drsi:'drsi',ath:'ath'}};
+  const rows=getRows();
   rows.sort((a,b)=>parseFloat(b.dataset[map[field]]||0)-parseFloat(a.dataset[map[field]]||0));
   const tbody=document.getElementById('tableBody');
-  rows.forEach(r=>{{tbody.appendChild(r);}});
-  document.querySelectorAll('.sort-btn').forEach(b=>b.classList.remove('active'));
-  event.target.classList.add('active');
+  rows.forEach(r=>{{
+    tbody.appendChild(r);
+    const detBtn=r.querySelector('button[onclick^="toggleDetail"]');
+    if(detBtn){{
+      const detId=detBtn.getAttribute('onclick').match(/'(d\\d+)'/)?.[1];
+      if(detId)tbody.appendChild(document.getElementById(detId));
+    }}
+  }});
 }}
-let lastThSort=-1, lastThDir=1;
-function thSort(col){{
+
+let lastCol=-1,lastDir=1;
+function colSort(col){{
   const tbody=document.getElementById('tableBody');
-  const rows=[...tbody.querySelectorAll('tr[data-name]')];
-  const dir=lastThSort===col?-lastThDir:1;
-  lastThSort=col; lastThDir=dir;
+  const rows=getRows();
+  const dir=lastCol===col?-lastDir:1;
+  lastCol=col; lastDir=dir;
   rows.sort((a,b)=>{{
-    const av=a.cells[col]?.textContent.replace(/[₹,%+▲▼▬~ ]/g,'').trim()||'';
-    const bv=b.cells[col]?.textContent.replace(/[₹,%+▲▼▬~ ]/g,'').trim()||'';
-    const an=parseFloat(av), bn=parseFloat(bv);
-    if(!isNaN(an)&&!isNaN(bn)) return dir*(an-bn);
+    const av=(a.cells[col]?.textContent||'').replace(/[₹,%+▲▼▬~ 💥]/g,'').trim();
+    const bv=(b.cells[col]?.textContent||'').replace(/[₹,%+▲▼▬~ 💥]/g,'').trim();
+    const an=parseFloat(av),bn=parseFloat(bv);
+    if(!isNaN(an)&&!isNaN(bn))return dir*(an-bn);
     return dir*av.localeCompare(bv);
   }});
-  rows.forEach(r=>tbody.appendChild(r));
+  rows.forEach(r=>{{
+    tbody.appendChild(r);
+    const detBtn=r.querySelector('button[onclick^="toggleDetail"]');
+    if(detBtn){{
+      const detId=detBtn.getAttribute('onclick').match(/'(d\\d+)'/)?.[1];
+      if(detId){{const det=document.getElementById(detId);if(det)tbody.appendChild(det);}}
+    }}
+  }});
   document.querySelectorAll('th').forEach((h,i)=>{{
     h.className=i===col?(dir===1?'asc':'desc'):'';
   }});
 }}
+
+function toggleDetail(id){{
+  const el=document.getElementById(id);
+  el.style.display=el.style.display==='none'?'table-row':'none';
+}}
+
 document.addEventListener('DOMContentLoaded',()=>{{
-  document.getElementById('countInfo').textContent=`Showing {n_total} stocks`;
+  applyFilters();
+  // highlight blast rows on load
+  getRows().forEach(r=>{{if(r.dataset.blast==='1')r.classList.add('blast-row');}});
 }});
 </script>
 </body>
 </html>'''
 
+# ── GitHub push ───────────────────────────────────────────────────────────────
+def push_to_github():
+    token = os.environ.get("GITHUB_TOKEN","")
+    if not token:
+        print("  GITHUB_TOKEN not set — skipping push")
+        return
+    try:
+        env = {**os.environ, "GIT_AUTHOR_NAME":"NSE Bot","GIT_AUTHOR_EMAIL":"bot@noreply",
+               "GIT_COMMITTER_NAME":"NSE Bot","GIT_COMMITTER_EMAIL":"bot@noreply"}
+        run_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+        subprocess.run(["git","add", OUTPUT_HTML, "multibagger_report.py"], check=True, env=env)
+        subprocess.run(["git","commit","-m",f"multibagger: S/R + Darvas + Blast report {run_ts}"],
+                       check=True, env=env)
+        remote = subprocess.run(["git","remote","get-url","origin"],
+                                capture_output=True, text=True).stdout.strip()
+        if remote.startswith("https://") and "@" not in remote:
+            remote = remote.replace("https://", f"https://x-access-token:{token}@")
+        subprocess.run(["git","push", remote, "HEAD"], check=True, env=env)
+        print(f"  ✅ Pushed to GitHub")
+    except subprocess.CalledProcessError as e:
+        print(f"  GitHub push failed: {e}")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    print("=" * 60)
-    print("  Multibagger Report + Darvas Box (D/W/M)")
-    print("=" * 60)
+    print("=" * 68)
+    print("  Multibagger v3.0 — NSE Cash + SME + S/R + Darvas + Daily Blast")
+    print("=" * 68)
 
-    tickers = load_nse_tickers()
+    tickers = load_all_tickers()
     cache   = load_cache()
-    results = []
-    errors  = 0
+    results, errors = [], 0
 
-    print(f"\n  Scanning {len(tickers)} stocks with {MAX_WORKERS} workers…\n")
+    n_cash_tickers = sum(1 for t in tickers if t[2] == "CASH")
+    n_sme_tickers  = sum(1 for t in tickers if t[2] == "SME")
+    print(f"\n  Scanning {len(tickers)} stocks ({n_cash_tickers} Cash + {n_sme_tickers} SME) …\n")
 
-    def process(sym_name):
-        sym, name = sym_name
-        return analyse(sym, name, cache)
+    def process(t):
+        return analyse(t[0], t[1], t[2], cache)
 
     batches = [tickers[i:i+BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
     done    = 0
 
     for batch in batches:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = {ex.submit(process, sn): sn for sn in batch}
+            futures = {ex.submit(process, t): t for t in batch}
             for fut in as_completed(futures):
                 r = fut.result()
                 done += 1
                 if r:
                     results.append(r)
-                    print(f"  [{done}/{len(tickers)}] {r['symbol']:12s} "
-                          f"close=₹{r['close']:>9,.2f}  score={r['score']:3d}  "
-                          f"signal={r['signal']:<20s}  "
-                          f"D-Box={r['darvas']['Daily']['status']:<9s}"
-                          f"W-Box={r['darvas']['Weekly']['status']:<9s}"
-                          f"M-Box={r['darvas']['Monthly']['status']}")
+                    blast_tag = " 💥BLAST" if r["is_blast"] else ""
+                    print(f"  [{done:4d}/{len(tickers)}] {r['symbol']:12s} "
+                          f"₹{r['close']:>9,.2f}  score={r['score']:3d}  "
+                          f"{r['signal']:<20s}  D={r['darvas']['Daily']['status']:<9s}{blast_tag}")
                 else:
                     errors += 1
-                    print(f"  [{done}/{len(tickers)}] {futures[fut][0]:12s}  — skipped")
         save_cache(cache)
         if batch != batches[-1]:
             time.sleep(BATCH_PAUSE)
 
-    # Sort by score desc
-    results.sort(key=lambda x: x["score"], reverse=True)
+    # Sort: blast first, then by score
+    results.sort(key=lambda x: (0 if x["is_blast"] else 1, -x["score"]))
 
     # Stats
-    n_total      = len(results)
-    n_ath        = sum(1 for r in results if r["is_ath"])
-    n_mrsi       = sum(1 for r in results if r["mrsi"] and r["mrsi"] > 70)
-    n_strong     = sum(1 for r in results if "BUY" in r["signal"] or "BLAST" in r["signal"])
-    n_darvas_out = sum(1 for r in results
-                       if any(r["darvas"][tf]["status"] == "BREAKOUT" for tf in ["Daily","Weekly","Monthly"]))
-    avg_score    = sum(r["score"] for r in results) / n_total if n_total else 0
+    n_total  = len(results)
+    n_blast  = sum(1 for r in results if r["is_blast"])
+    n_ath    = sum(1 for r in results if r["is_ath"])
+    n_mrsi   = sum(1 for r in results if r["mrsi"] and r["mrsi"] > 70)
+    n_darvas = sum(1 for r in results if any(
+        r["darvas"][tf]["status"] == "BREAKOUT" for tf in ["Daily","Weekly","Monthly"]))
+    n_strong = sum(1 for r in results if "BUY" in r["signal"] or "BLAST" in r["signal"])
+    avg_score = sum(r["score"] for r in results) / n_total if n_total else 0
+    n_cash   = sum(1 for r in results if r["segment"] == "CASH")
+    n_sme    = sum(1 for r in results if r["segment"] == "SME")
+    run_ts   = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
 
-    run_ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-
-    # Build rows
-    rows_html = ""
-    for i, r in enumerate(results, 1):
-        rows_html += build_row(i, r)
+    rows_html = "".join(build_row(i+1, r) for i, r in enumerate(results))
 
     html = HTML_TEMPLATE.format(
-        run_ts=run_ts,
-        n_total=n_total,
-        n_ath=n_ath,
-        n_mrsi=n_mrsi,
-        n_strong=n_strong,
-        n_darvas_out=n_darvas_out,
-        avg_score=avg_score,
+        run_ts=run_ts, n_total=n_total, n_blast=n_blast, n_ath=n_ath,
+        n_mrsi=n_mrsi, n_darvas=n_darvas, n_strong=n_strong,
+        avg_score=avg_score, n_cash=n_cash, n_sme=n_sme,
         rows_html=rows_html,
     )
 
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"\n{'='*60}")
-    print(f"  ✅ Report saved → {OUTPUT_HTML}")
-    print(f"  Stocks: {n_total} | ATH: {n_ath} | M-RSI>70: {n_mrsi} | Strong: {n_strong} | Darvas Breakouts: {n_darvas_out}")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*68}")
+    print(f"  ✅ {OUTPUT_HTML} — {n_total} stocks | 💥 Blast: {n_blast} | ATH: {n_ath} | Score avg: {avg_score:.1f}")
+    print(f"{'='*68}\n")
+
+    # Push to GitHub
+    push_to_github()
 
 
 if __name__ == "__main__":
