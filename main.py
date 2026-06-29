@@ -116,7 +116,7 @@ def run_nse_report():
             job_running = False
 
 
-def run_email_send():
+def run_email_send(dry_run=False):
     global email_running, email_started_at, email_last_result
     with email_lock:
         if email_running:
@@ -126,13 +126,19 @@ def run_email_send():
         email_started_at = datetime.now(IST)
         email_last_result = None
     try:
-        log.info('Starting manual email send…')
+        mode = 'TEST (sender only)' if dry_run else 'ALL subscribers'
+        log.info(f'Starting manual email send — {mode}…')
+        env = dict(os.environ)
+        if dry_run:
+            gmail_user = os.environ.get('GMAIL_USERNAME', '')
+            env['EMAIL_RECIPIENTS'] = gmail_user
         result = subprocess.run(
             [sys.executable, 'send_report_email.py'],
-            capture_output=True, text=True, timeout=300
+            capture_output=True, text=True, timeout=300, env=env
         )
         if result.returncode == 0:
-            email_last_result = {'ok': True, 'msg': 'Emails sent successfully.'}
+            msg = 'Test email sent to your Gmail.' if dry_run else 'Emails sent to all subscribers.'
+            email_last_result = {'ok': True, 'msg': msg}
             log.info('Email send completed successfully.')
         else:
             err = (result.stderr or result.stdout or 'Unknown error')[-300:]
@@ -476,10 +482,13 @@ def send_email_now():
     gmail_pass = os.environ.get('GMAIL_APP_PASSWORD', '')
     if not gmail_user or not gmail_pass:
         return jsonify({'started': False, 'message': 'GMAIL_USERNAME or GMAIL_APP_PASSWORD not set.'})
-    t = threading.Thread(target=run_email_send, daemon=True)
+    data = request.get_json(silent=True) or {}
+    dry_run = bool(data.get('dry_run', False))
+    t = threading.Thread(target=run_email_send, kwargs={'dry_run': dry_run}, daemon=True)
     t.start()
-    log.info('Email send triggered manually via /send-email endpoint.')
-    return jsonify({'started': True, 'message': 'Email send started.'})
+    mode = 'test (sender only)' if dry_run else 'all subscribers'
+    log.info(f'Email send triggered manually — {mode}.')
+    return jsonify({'started': True, 'message': f'Email send started ({mode}).'})
 
 
 @app.route('/email-status')
@@ -747,6 +756,10 @@ def admin_subscribers():
 <div class="run-section">
   <div>
     <div class="run-info">📧 <strong>Send Report Email</strong> — delivers the latest report to all {len(recipients)} subscribers</div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:0.83rem;color:#94a3b8;cursor:pointer;">
+      <input type="checkbox" id="dryRunChk" style="accent-color:#38bdf8;width:15px;height:15px;">
+      Test mode — send only to me (preview before full send)
+    </label>
     <div class="run-status" id="emailStatus"></div>
   </div>
   <button class="run-btn" id="emailBtn" onclick="adminSendEmail()">✉️ Send Email Now</button>
@@ -777,10 +790,11 @@ def admin_subscribers():
 async function adminSendEmail() {{
   const btn = document.getElementById('emailBtn');
   const st  = document.getElementById('emailStatus');
-  btn.disabled = true; btn.textContent = '⏳ Sending…';
+  const dryRun = document.getElementById('dryRunChk').checked;
+  btn.disabled = true; btn.textContent = dryRun ? '⏳ Sending test…' : '⏳ Sending…';
   st.className = 'run-status running'; st.textContent = '';
   try {{
-    const r = await fetch('/send-email', {{method:'POST'}});
+    const r = await fetch('/send-email', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{dry_run:dryRun}})}});
     const d = await r.json();
     if (d.started) {{
       st.textContent = '⏳ Sending to all subscribers…';

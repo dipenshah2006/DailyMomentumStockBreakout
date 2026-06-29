@@ -6,6 +6,27 @@ Automated NSE stock analysis toolkit that generates daily HTML reports and email
 
 ## 🔗 Live Reports — All URLs
 
+### 🖥️ Replit Dashboard (live server — admin, subscribers, manual run)
+
+The Flask dashboard runs on Replit and provides admin controls not available on GitHub Pages.
+
+| Page | URL |
+|------|-----|
+| 📊 Dashboard (main report) | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ |
+| ⚙️ Admin panel | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/subscribers |
+| 🏆 ATH Breakout | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ath |
+| 🚀 Rocket Scanner | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/rocket |
+
+**Admin panel** (`/subscribers`) requires the `ADMIN_PASSWORD` secret. From there you can:
+- View, add, remove, and bulk-import subscribers
+- Export the mailing list as CSV
+- Trigger a full NSE report run manually
+- Send the latest report email to all subscribers (or just yourself for a test preview)
+
+> **Note:** The Replit URL is active while the Replit workflow is running. For always-on access, use the **Publish** button in Replit to get a permanent `.replit.app` deployment URL.
+
+---
+
 ### 📡 GitHub Pages (always-on, no login needed)
 
 | Report | URL |
