@@ -899,11 +899,26 @@ async function pollRun() {{
     return Response(html, mimetype='text/html')
 
 
+def _keep_alive():
+    """Ping ourselves every 10 minutes so Replit never sleeps during market days."""
+    import urllib.request
+    try:
+        host = os.environ.get('REPLIT_DEV_DOMAIN') or '127.0.0.1:5000'
+        url = f'http://127.0.0.1:5000/status'
+        urllib.request.urlopen(url, timeout=10)
+        log.debug('Keep-alive ping sent.')
+    except Exception:
+        pass  # silent — server may not be ready yet
+
+
 if __name__ == '__main__':
     scheduler = BackgroundScheduler(timezone=IST)
-    scheduler.add_job(run_nse_report, 'cron', hour=5, minute=0)
+    # Mon–Sat at 5:00 AM IST (NSE is closed on Sunday)
+    scheduler.add_job(run_nse_report, 'cron', day_of_week='mon-sat', hour=5, minute=0)
+    # Ping every 10 min to keep the process alive so the cron always fires
+    scheduler.add_job(_keep_alive, 'interval', minutes=10)
     scheduler.start()
-    log.info('Scheduler started — NSE report will run daily at 5:00 AM IST.')
+    log.info('Scheduler started — NSE report will run Mon–Sat at 5:00 AM IST.')
 
     if not latest_report():
         log.info('No existing report found — generating first report now...')
