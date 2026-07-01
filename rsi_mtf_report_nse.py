@@ -1221,12 +1221,32 @@ def _populate_indices():
     """
     _INDEX_MAP["NIFTY50"] = set(NIFTY50)   # hardcoded fallback always present
 
+    # Maps category label → short suffix used in sector dropdown.
+    # Covers both the XLSX CATEGORY column values ('Sectoral', 'Thematic', …)
+    # AND the longer legacy variants ('Sectoral Indices', …) for forward-compat.
     CAT_SHORT = {
+        # Actual values found in NIFTY_Indices_Master.xlsx CATEGORY column
+        "Sectoral"           : "Sectoral",
+        "Thematic"           : "Thematic",
+        "Strategy"           : "Strategy",
+        "Broad Based"        : "",          # broad → index only, not sector
+        # Legacy / alternative spellings (kept for forward-compat)
         "Sectoral Indices"   : "Sectoral",
         "Thematic Indices"   : "Thematic",
         "Strategy Indices"   : "Strategy",
-        "Broad Based Indices": "",          # broad → index only, not sector
+        "Broad Based Indices": "",
     }
+
+    # Infer category when the CATEGORY column is absent (individual _Stocks sheets)
+    def _sheet_to_cat(sname: str) -> str:
+        su = sname.upper()
+        if 'SECTORAL' in su:
+            return 'Sectoral'
+        if 'THEMATIC' in su:
+            return 'Thematic'
+        if 'STRATEGY' in su:
+            return 'Strategy'
+        return ''   # Broad_Based_Stocks → skip for _SECTOR_MAP
 
     if not os.path.exists(LOCAL_INDICES_XLSX):
         print(f"  ⚠️  '{LOCAL_INDICES_XLSX}' not found")
@@ -1236,8 +1256,9 @@ def _populate_indices():
             import openpyxl
             wb = openpyxl.load_workbook(LOCAL_INDICES_XLSX, read_only=True, data_only=True)
 
+            # Accept 'All_Stocks' (actual sheet name) as well as 'All_Stocks_Combined'
             STOCK_SHEETS = [s for s in wb.sheetnames
-                            if s.endswith('_Stocks') or s == 'All_Stocks_Combined']
+                            if s.endswith('_Stocks') or s in ('All_Stocks_Combined', 'All_Stocks')]
             if not STOCK_SHEETS:
                 STOCK_SHEETS = [s for s in wb.sheetnames if s != 'Summary']
 
@@ -1266,6 +1287,9 @@ def _populate_indices():
                 if header_idx is None or sym_col is None:
                     continue
 
+                # Category fallback: infer from sheet name when column is absent
+                sheet_cat_fallback = _sheet_to_cat(sheet_name)
+
                 for row in rows[header_idx + 1:]:
                     if not row or len(row) <= sym_col:
                         continue
@@ -1281,7 +1305,7 @@ def _populate_indices():
                                 else sheet_name)
                     category = (str(row[cat_col]).strip()
                                 if cat_col is not None and len(row) > cat_col and row[cat_col]
-                                else '')
+                                else sheet_cat_fallback)
 
                     # Add to _INDEX_MAP (all categories)
                     if idx_name not in _INDEX_MAP:
