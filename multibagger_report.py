@@ -45,7 +45,7 @@ warnings.filterwarnings('ignore')
 REPORT_HTML    = "multibagger_report.html"
 CHARTS_DIR     = Path("charts/multibagger")
 CACHE_FILE     = Path("charts/multibagger/scan_cache.json")   # progress cache (legacy)
-MB_CACHE_FILE  = Path("mb_data_cache.pkl")                    # smart OHLCV cache (NEW)
+MB_CACHE_FILE  = Path("stock_data_cache.pkl")                  # shared cache with rsi_mtf_report_nse.py
 MAX_WORKERS    = 16           # parallel analysis workers (pure CPU — no I/O)
 IST_OFFSET     = "+05:30"
 
