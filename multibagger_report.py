@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
 DailyMomentumStockBreakout — Full NSE + SME Scanner
-Scans ALL NSE Cash + SME stocks (~2881 total) for:
+Scans ALL NSE Cash + SME stocks (~2657 total) for:
   • Support / Resistance levels  (monthly + weekly charts)
   • Trend Channels               (monthly + weekly charts)
   • Darvas Box                   (daily / weekly / monthly)
   • BLAST column                 (strong daily breakout detection)
   • MTF signals, Fibonacci, Backtesting
   • Auto-push to GitHub at end
+
+Performance: batch yfinance downloads (50 tickers/call) + smart pickle cache.
+  First run  : downloads full history for all tickers (~30–60 min)
+  Daily runs : only fetches missing bars for stale tickers (<10 min)
 """
 
 import os
@@ -15,13 +19,17 @@ import io
 import sys
 import json
 import time
+import pickle
 import warnings
 import subprocess
 import threading
 import numpy as np
 import pandas as pd
+import yfinance as yf
+import concurrent.futures as _cf
+
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as _date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import matplotlib
@@ -36,10 +44,15 @@ warnings.filterwarnings('ignore')
 # ── Constants ────────────────────────────────────────────────────────────────
 REPORT_HTML    = "multibagger_report.html"
 CHARTS_DIR     = Path("charts/multibagger")
-CACHE_FILE     = Path("charts/multibagger/scan_cache.json")
-LOOKBACK_YEARS = 10
-MAX_WORKERS    = 12           # parallel yfinance workers
+CACHE_FILE     = Path("charts/multibagger/scan_cache.json")   # progress cache (legacy)
+MB_CACHE_FILE  = Path("mb_data_cache.pkl")                    # smart OHLCV cache (NEW)
+MAX_WORKERS    = 16           # parallel analysis workers (pure CPU — no I/O)
 IST_OFFSET     = "+05:30"
+
+# Batch download config (borrowed from rsi_mtf_report_nse.py)
+DL_BATCH_SIZE  = 50           # tickers per yf.download() call
+DL_MAX_WORKERS = 8            # threads for market-cap fetch
+CACHE_SAVE_INT = 500          # save pickle every N tickers processed
 
 NSE_CASH_CSV   = Path("india/NSE/NSECash/EQUITY_L.csv")
 NSE_SME_CSV    = Path("india/NSE/NSESME/MW-SME-05-May-2026.csv")
@@ -58,6 +71,11 @@ MACD_SF, MACD_SS, MACD_SSIG     = 34, 1000, 20
 BLAST_VOL_RATIO = 2.0
 BLAST_RSI_MIN   = 52
 BLAST_RSI_MAX   = 85
+
+# IPO-friendly minimum bars — accept any stock with at least this much data
+MIN_DAILY   = 30    # was 60 — includes recent IPOs
+MIN_WEEKLY  = 10    # was 20
+MIN_MONTHLY = 3     # was 12 — even 3 months of data is enough to scan
 
 MPLSTYLE = {
     'axes.facecolor':   '#0d1117',
@@ -80,14 +98,13 @@ def tprint(*args, **kwargs):
 
 # ── Load Stock Universe ───────────────────────────────────────────────────────
 def load_nse_stocks():
-    stocks = {}   # name → ticker
+    stocks = {}   # name → ticker (with .NS suffix)
 
     # NSE Cash (EQUITY_L.csv) — EQ series only
     if NSE_CASH_CSV.exists():
         try:
             df = pd.read_csv(NSE_CASH_CSV)
             df.columns = [c.strip() for c in df.columns]
-            # Detect series column
             ser_col = None
             for col in df.columns:
                 if 'SERIES' in col.upper():
@@ -104,7 +121,7 @@ def load_nse_stocks():
         except Exception as e:
             tprint(f"  ⚠️  NSE Cash CSV error: {e}")
 
-    # NSE SME (MW-SME-05-May-2026.csv)
+    # NSE SME
     sme_count = 0
     if NSE_SME_CSV.exists():
         try:
@@ -123,6 +140,344 @@ def load_nse_stocks():
             tprint(f"  ⚠️  NSE SME CSV error: {e}")
 
     return stocks
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SMART CACHE ENGINE  (v2 pickle, same layout as rsi_mtf_report_nse.py)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  _MB_CACHE layout:
+#  {
+#    "__version__": 2,
+#    "TICKER": {
+#        "df":        pd.DataFrame,   # full daily OHLCV history
+#        "last_date": "YYYY-MM-DD",   # most recent bar date
+#    },
+#    ...
+#  }
+#
+#  On every run:
+#   Fresh  (last_date >= yesterday): used as-is → 0 downloads
+#   Stale  (last_date < yesterday) : batch-download missing dates, append
+#   New    (never seen)            : batch-download period="max"
+#
+# ═════════════════════════════════════════════════════════════════════════════
+
+_MB_CACHE: dict = {}
+_MB_CACHE_DIRTY = False
+
+
+def _last_trading_day() -> str:
+    today = _date.today()
+    if today.weekday() == 0:
+        return (today - timedelta(days=3)).isoformat()
+    if today.weekday() in (5, 6):
+        return (today - timedelta(days=today.weekday() - 4)).isoformat()
+    return (today - timedelta(days=1)).isoformat()
+
+
+def _mb_is_fresh(entry: dict) -> bool:
+    return entry.get("last_date", "") >= _last_trading_day()
+
+
+def _mb_load_cache() -> dict:
+    global _MB_CACHE
+    if not MB_CACHE_FILE.exists():
+        tprint("  📦 No existing data cache — will download fresh.")
+        _MB_CACHE = {"__version__": 2}
+        return _MB_CACHE
+    try:
+        with open(MB_CACHE_FILE, "rb") as fh:
+            raw = pickle.load(fh)
+    except Exception as e:
+        tprint(f"  [!] Cache load error: {e} — starting fresh")
+        _MB_CACHE = {"__version__": 2}
+        return _MB_CACHE
+
+    # Migrate old v1 format (plain dict of DataFrames)
+    if isinstance(raw, dict) and raw.get("__version__") != 2:
+        migrated = {"__version__": 2}
+        cnt = 0
+        for k, v in raw.items():
+            if k.startswith("__"):
+                continue
+            if isinstance(v, pd.DataFrame) and not v.empty:
+                last = v.index[-1].date().isoformat() if len(v) else ""
+                migrated[k] = {"df": v, "last_date": last}
+                cnt += 1
+        tprint(f"  🔄 Migrated {cnt} entries from old cache format to v2")
+        _MB_CACHE = migrated
+        return _MB_CACHE
+
+    # Repair mixed entries
+    fixed = 0
+    for k, v in list(raw.items()):
+        if k.startswith("__"):
+            continue
+        if isinstance(v, pd.DataFrame):
+            last = v.index[-1].date().isoformat() if len(v) else ""
+            raw[k] = {"df": v, "last_date": last}
+            fixed += 1
+    if fixed:
+        tprint(f"  🔧 Repaired {fixed} legacy DataFrame entries in cache")
+
+    _MB_CACHE = raw
+    return _MB_CACHE
+
+
+def _mb_save_cache():
+    global _MB_CACHE_DIRTY
+    MB_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(MB_CACHE_FILE, "wb") as fh:
+            pickle.dump(_MB_CACHE, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        _MB_CACHE_DIRTY = False
+        tprint(f"  💾 Cache saved → {MB_CACHE_FILE}")
+    except Exception as e:
+        tprint(f"  [!] Cache save error: {e}")
+
+
+def _mb_maybe_save():
+    if _MB_CACHE_DIRTY:
+        _mb_save_cache()
+
+
+def _mb_get_df(ticker_bare: str) -> pd.DataFrame | None:
+    """Get cached DataFrame for ticker (without .NS suffix)."""
+    entry = _MB_CACHE.get(ticker_bare)
+    if isinstance(entry, dict):
+        df = entry.get("df")
+        return df if (isinstance(df, pd.DataFrame) and not df.empty) else None
+    if isinstance(entry, pd.DataFrame):
+        return entry if not entry.empty else None
+    return None
+
+
+def _mb_set_df(ticker_bare: str, df: pd.DataFrame):
+    global _MB_CACHE_DIRTY
+    existing = _MB_CACHE.get(ticker_bare)
+    if not isinstance(existing, dict):
+        _MB_CACHE[ticker_bare] = {}
+    entry = _MB_CACHE[ticker_bare]
+    # Flatten MultiIndex if needed
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            df = df.droplevel(1, axis=1)
+        except Exception:
+            pass
+        df = df.dropna(subset=["Close"]) if "Close" in df.columns else df
+    entry["df"]        = df
+    entry["last_date"] = df.index[-1].date().isoformat() if len(df) else ""
+    _MB_CACHE_DIRTY = True
+
+
+def _mb_merge_df(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    if new_df is None or new_df.empty:
+        return old_df
+    if old_df is None or old_df.empty:
+        return new_df
+    combined = pd.concat([old_df, new_df])
+    combined = combined[~combined.index.duplicated(keep="last")]
+    return combined.sort_index()
+
+
+# ── Batch download ────────────────────────────────────────────────────────────
+
+def _mb_batch_download(tickers_bare: list[str],
+                       period: str | None = None,
+                       start: str | None = None,
+                       end: str | None = None) -> dict[str, pd.DataFrame]:
+    """
+    Download multiple tickers in one yf.download() call.
+    tickers_bare: list of bare symbols (no .NS suffix).
+    Returns {bare_ticker: clean_DataFrame}.
+    """
+    if not tickers_bare:
+        return {}
+
+    ns_list = [t + ".NS" for t in tickers_bare]
+    args = {
+        "tickers": ns_list,
+        "interval": "1d",
+        "progress": False,
+        "auto_adjust": True,
+        "group_by": "ticker",
+        "threads": True,
+    }
+    if start and end:
+        args["start"] = start
+        args["end"]   = end
+    elif period:
+        args["period"] = period
+    else:
+        args["period"] = "max"
+
+    # Silence yfinance noise
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        raw = yf.download(**args)
+    except Exception as e:
+        sys.stderr = old_stderr
+        tprint(f"\n  [!] Batch download error ({len(tickers_bare)} tickers): {e}")
+        return {}
+    finally:
+        sys.stderr = old_stderr
+
+    if raw is None or raw.empty:
+        return {}
+
+    results = {}
+    for ticker in tickers_bare:
+        ns = ticker + ".NS"
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                lvl0 = raw.columns.get_level_values(0).tolist()
+                lvl1 = raw.columns.get_level_values(1).tolist()
+                # yfinance >= 0.2.38: metric at level 0, ticker at level 1
+                if ns in lvl1:
+                    df = raw.xs(ns, axis=1, level=1).copy()
+                elif ticker in lvl1:
+                    df = raw.xs(ticker, axis=1, level=1).copy()
+                # older format: ticker at level 0
+                elif ns in lvl0:
+                    df = raw[ns].copy()
+                elif ticker in lvl0:
+                    df = raw[ticker].copy()
+                else:
+                    continue
+            else:
+                # Single ticker returned — flat columns
+                df = raw.copy()
+
+            if "Close" not in df.columns:
+                continue
+            df = df.dropna(subset=["Close"])
+            if not df.empty:
+                # Keep only OHLCV
+                cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+                df = df[cols]
+                results[ticker] = df
+        except Exception:
+            continue
+
+    return results
+
+
+# ── Pre-fetch all tickers (called once before analysis loop) ─────────────────
+
+def prefetch_all_mb(tickers_bare: list[str]) -> dict[str, int]:
+    """
+    Smart incremental download for the full universe.
+    Classifies each ticker as fresh / stale / new and downloads accordingly.
+    Returns stats dict: {fresh, stale_updated, new_downloaded, failed}
+    """
+    global _MB_CACHE_DIRTY
+
+    fresh_list = []
+    stale_list = []
+    new_list   = []
+
+    for t in tickers_bare:
+        entry = _MB_CACHE.get(t)
+        if isinstance(entry, dict) and isinstance(entry.get("df"), pd.DataFrame) and not entry["df"].empty:
+            if _mb_is_fresh(entry):
+                fresh_list.append(t)
+            else:
+                stale_list.append(t)
+        else:
+            new_list.append(t)
+
+    tprint(f"\n  📦 Cache status:")
+    tprint(f"     ✅ Fresh  : {len(fresh_list)} (will skip download)")
+    tprint(f"     🔄 Stale  : {len(stale_list)} (will append missing bars)")
+    tprint(f"     🆕 New    : {len(new_list)} (full history download)")
+    tprint(f"     📊 Total  : {len(tickers_bare)}\n")
+
+    stats = {"fresh": len(fresh_list), "stale_updated": 0,
+             "new_downloaded": 0, "failed": 0}
+
+    # ── Update stale tickers (append only missing dates) ────────────────────
+    if stale_list:
+        tprint(f"  🔄 Updating {len(stale_list)} stale tickers…")
+        processed = 0
+        total_batches = -(-len(stale_list) // DL_BATCH_SIZE)
+        for batch_start in range(0, len(stale_list), DL_BATCH_SIZE):
+            batch = stale_list[batch_start: batch_start + DL_BATCH_SIZE]
+            # Use a common start date: earliest "last_date + 1 day" across the batch
+            dates = []
+            for t in batch:
+                entry = _MB_CACHE.get(t, {})
+                ld    = entry.get("last_date") if isinstance(entry, dict) else None
+                if ld:
+                    try:
+                        dates.append(_date.fromisoformat(ld) + timedelta(days=1))
+                    except Exception:
+                        pass
+            start_dt = min(dates).isoformat() if dates else (_date.today() - timedelta(days=90)).isoformat()
+            end_dt   = (_date.today() + timedelta(days=1)).isoformat()
+
+            bn = batch_start // DL_BATCH_SIZE + 1
+            sys.stdout.write(f"\r    Stale batch {bn}/{total_batches}  ({batch_start+len(batch)}/{len(stale_list)})  start={start_dt} …")
+            sys.stdout.flush()
+
+            new_data = _mb_batch_download(batch, start=start_dt, end=end_dt)
+            for t in batch:
+                if t not in new_data:
+                    stats["failed"] += 1
+                    continue
+                old_df  = _mb_get_df(t)
+                merged  = _mb_merge_df(old_df, new_data[t])
+                if not merged.empty:
+                    _mb_set_df(t, merged)
+                    stats["stale_updated"] += 1
+                else:
+                    stats["failed"] += 1
+
+            processed += len(batch)
+            if _MB_CACHE_DIRTY and processed % CACHE_SAVE_INT == 0:
+                _mb_save_cache()
+
+        print()
+
+    # ── Download new tickers (full max history) ──────────────────────────────
+    if new_list:
+        tprint(f"  🆕 Downloading {len(new_list)} new tickers (full history, period=max)…")
+        processed = 0
+        total_batches = -(-len(new_list) // DL_BATCH_SIZE)
+        for batch_start in range(0, len(new_list), DL_BATCH_SIZE):
+            batch = new_list[batch_start: batch_start + DL_BATCH_SIZE]
+            bn    = batch_start // DL_BATCH_SIZE + 1
+            sys.stdout.write(f"\r    New   batch {bn}/{total_batches}  ({batch_start+len(batch)}/{len(new_list)}) …")
+            sys.stdout.flush()
+
+            new_data = _mb_batch_download(batch, period="max")
+            for t in batch:
+                if t not in new_data:
+                    stats["failed"] += 1
+                    continue
+                df = new_data[t]
+                if not df.empty:
+                    _mb_set_df(t, df)
+                    stats["new_downloaded"] += 1
+                else:
+                    stats["failed"] += 1
+
+            processed += len(batch)
+            if _MB_CACHE_DIRTY and processed % CACHE_SAVE_INT == 0:
+                _mb_save_cache()
+
+        print()
+
+    # Final save
+    _mb_maybe_save()
+
+    tprint(f"\n  ✅ Prefetch complete:")
+    tprint(f"     Fresh used    : {stats['fresh']}")
+    tprint(f"     Stale updated : {stats['stale_updated']}")
+    tprint(f"     New downloaded: {stats['new_downloaded']}")
+    tprint(f"     Failed/no data: {stats['failed']}\n")
+    return stats
+
 
 # ── Technical Helpers ─────────────────────────────────────────────────────────
 def rsi(series, period=14):
@@ -202,15 +557,11 @@ def psar(high, low, iaf=0.02, maxaf=0.2):
 
 # ── Support / Resistance Detection ───────────────────────────────────────────
 def find_support_resistance(df, window=10, tolerance=0.015, min_touches=2, max_levels=5):
-    """Find key S/R levels using pivot clustering."""
     h, l = df['High'], df['Low']
     res_raw, sup_raw = [], []
-
     for i in range(window, len(df) - window):
-        # Local high (resistance pivot)
         if h.iloc[i] == h.iloc[i-window:i+window+1].max():
             res_raw.append(float(h.iloc[i]))
-        # Local low (support pivot)
         if l.iloc[i] == l.iloc[i-window:i+window+1].min():
             sup_raw.append(float(l.iloc[i]))
 
@@ -235,12 +586,11 @@ def find_support_resistance(df, window=10, tolerance=0.015, min_touches=2, max_l
 
 # ── Trend Channel (linear regression) ────────────────────────────────────────
 def trend_channel(df, lookback=60):
-    """Return (trend_vals, upper_vals, lower_vals, index) for plotting."""
     data = df.tail(lookback).copy()
-    if len(data) < 20:
+    if len(data) < 10:
         return None
-    x   = np.arange(len(data))
-    y   = data['Close'].values
+    x      = np.arange(len(data))
+    y      = data['Close'].values
     coeffs = np.polyfit(x, y, 1)
     trend  = np.polyval(coeffs, x)
     resid  = y - trend
@@ -249,25 +599,18 @@ def trend_channel(df, lookback=60):
 
 # ── Darvas Box Detection ──────────────────────────────────────────────────────
 def darvas_boxes(df, confirm_days=3):
-    """
-    Detect Darvas Boxes.
-    Returns list of dicts: {box_start, box_end, top, bottom, breakout, breakdown}
-    """
-    if len(df) < 30:
+    if len(df) < max(15, confirm_days * 3):
         return []
-
     highs  = df['High'].values
     lows   = df['Low'].values
     closes = df['Close'].values
     dates  = df.index
     boxes  = []
-
     i = confirm_days
     while i < len(df) - 1:
-        # Find candidate box top: a high that wasn't exceeded for confirm_days
         box_top = highs[i]
-        if all(highs[i+1:i+1+confirm_days] <= box_top):
-            # Box top established — now find box bottom
+        check_end = min(i + 1 + confirm_days, len(df))
+        if all(highs[i+1:check_end] <= box_top):
             j = i + confirm_days
             box_bottom = lows[i]
             while j < len(df) and highs[j] <= box_top * 1.002:
@@ -275,7 +618,6 @@ def darvas_boxes(df, confirm_days=3):
                     box_bottom = lows[j]
                 j += 1
             if j < len(df) and j - i >= confirm_days:
-                # Check breakout or breakdown
                 breakout  = bool(closes[j] > box_top)
                 breakdown = bool(closes[j] < box_bottom)
                 boxes.append({
@@ -289,11 +631,9 @@ def darvas_boxes(df, confirm_days=3):
             i = j + 1
         else:
             i += 1
-
-    return boxes[-10:]  # Keep last 10 boxes
+    return boxes[-10:]
 
 def darvas_latest_status(boxes):
-    """Return latest Darvas box status for the table."""
     if not boxes:
         return 'None', 0.0, 0.0
     b = boxes[-1]
@@ -302,18 +642,8 @@ def darvas_latest_status(boxes):
 
 # ── Blast Signal Detection ────────────────────────────────────────────────────
 def detect_blast(df_d, resistance_levels, lookback_days=3):
-    """
-    BLAST = strong daily breakout:
-      - Closed above nearest resistance OR near 52-week high
-      - Volume ≥ BLAST_VOL_RATIO × 20-day avg
-      - RSI in [BLAST_RSI_MIN, BLAST_RSI_MAX]
-      - Price above EMA21 and EMA50
-    Returns (is_blast: bool, blast_score: int 0-100, reason: str)
-    """
     if len(df_d) < 22:
         return False, 0, ''
-
-    recent  = df_d.tail(lookback_days)
     last    = df_d.iloc[-1]
     close   = float(last['Close'])
     vol_r   = float(last.get('VOL_RATIO', 1.0))
@@ -326,31 +656,22 @@ def detect_blast(df_d, resistance_levels, lookback_days=3):
     score  = 0
     reason = []
 
-    # Volume surge
     if vol_r < BLAST_VOL_RATIO:
         return False, 0, ''
-
-    # RSI check
     if not (BLAST_RSI_MIN <= d_rsi <= BLAST_RSI_MAX):
         return False, 0, ''
-
-    # Price above key MAs
     if close < ema21 or close < ema50:
         return False, 0, ''
 
-    # Score components
-    score += min(30, int((vol_r - BLAST_VOL_RATIO) * 15))   # volume bonus
-    score += min(20, int((d_rsi - 50) * 0.7))                # RSI bonus
+    score += min(30, int((vol_r - BLAST_VOL_RATIO) * 15))
+    score += min(20, int((d_rsi - 50) * 0.7))
 
-    # 52-week high breakout
     if close >= high52 * 0.998:
         score += 30
         reason.append('52W High')
-    # ATH breakout
     if close >= ath * 0.998:
         score += 20
         reason.append('ATH')
-    # Resistance breakout
     if resistance_levels:
         for lvl in resistance_levels:
             if close > lvl * 1.001 and close < lvl * 1.05:
@@ -358,33 +679,30 @@ def detect_blast(df_d, resistance_levels, lookback_days=3):
                 reason.append(f'Res ₹{lvl:,.0f}')
                 break
 
-    score = min(100, score)
+    score    = min(100, score)
     is_blast = score >= 30 and bool(reason)
-
     return is_blast, score, ' + '.join(reason) if reason else 'Vol Surge'
 
-# ── Data Fetching ─────────────────────────────────────────────────────────────
-def fetch_data(ticker, years=LOOKBACK_YEARS):
-    import yfinance as yf
-    end   = datetime.today()
-    start = end - timedelta(days=years*365 + 60)
-    try:
-        df = yf.download(
-            ticker,
-            start=start.strftime('%Y-%m-%d'),
-            end=end.strftime('%Y-%m-%d'),
-            progress=False, auto_adjust=True, actions=False
-        )
-        if df is None or df.empty or len(df) < 60:
-            return None
-        df.index = pd.to_datetime(df.index)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df[['Open','High','Low','Close','Volume']].copy()
-        df.dropna(inplace=True)
-        return df
-    except Exception:
+# ── Fetch data from cache ─────────────────────────────────────────────────────
+def fetch_data_from_cache(ticker: str) -> pd.DataFrame | None:
+    """
+    Read pre-fetched data from the in-memory cache.
+    ticker: full Yahoo ticker e.g. 'RELIANCE.NS'
+    Returns clean OHLCV DataFrame or None.
+    """
+    bare = ticker.replace(".NS", "").replace(".BO", "")
+    df   = _mb_get_df(bare)
+    if df is None or df.empty:
         return None
+    df = df.copy()
+    df.index = pd.to_datetime(df.index)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    if "Close" not in cols:
+        return None
+    df = df[cols].dropna()
+    return df if len(df) >= MIN_DAILY else None
 
 def resample_weekly(df):
     return df.resample('W').agg(
@@ -426,8 +744,8 @@ def add_indicators(df):
     df['ATH_PCT']   = ((c / prev_ath.replace(0, np.nan)) - 1) * 100
     df['ATH_BREAK'] = c > prev_ath
 
-    df['HIGH52W']   = h.rolling(252).max()
-    df['LOW52W']    = l.rolling(252).min()
+    df['HIGH52W']   = h.rolling(min(252, len(h))).max()
+    df['LOW52W']    = l.rolling(min(252, len(l))).min()
 
     try:
         df['SAR'] = psar(h, l)
@@ -519,12 +837,12 @@ def compute_score(df_d, df_w, df_m, signals, is_blast):
 
     us = df_d['MACD_US'].iloc[-1]
     us_prev = df_d['MACD_US'].iloc[-5] if len(df_d) > 5 else us
-    if us >= 0:          score += 15
+    if us >= 0:            score += 15
     elif us > -0.02*c_val: score += 8
-    if us > us_prev:     score += 5
+    if us > us_prev:       score += 5
 
     w_rsi = df_w['RSI'].iloc[-1] if len(df_w) > 0 else 50
-    if w_rsi > 60: score += 10
+    if w_rsi > 60:   score += 10
     elif w_rsi > 50: score += 5
 
     d_rsi = df_d['RSI'].iloc[-1]
@@ -532,19 +850,19 @@ def compute_score(df_d, df_w, df_m, signals, is_blast):
     elif d_rsi > 75:      score += 4
 
     vr = df_d['VOL_RATIO'].iloc[-1]
-    if vr > 2.5: score += 7
+    if vr > 2.5:   score += 7
     elif vr > 1.5: score += 4
 
     if df_d['ADX'].iloc[-1] > 30: score += 5
     if is_blast: score += 15
 
     recent = signals.tail(20)
-    if 'STRONG BUY' in recent.values:    score += 10
-    elif 'MACD MEGA BUY' in recent.values: score += 8
+    if 'STRONG BUY' in recent.values:       score += 10
+    elif 'MACD MEGA BUY' in recent.values:  score += 8
 
     return min(score, 100)
 
-# ── Chart: Daily (5-panel) with Darvas + Blast + S/R ─────────────────────────
+# ── Chart: Daily (5-panel) ────────────────────────────────────────────────────
 def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_score,
                 resistance, support, out_path):
     with plt.rc_context(MPLSTYLE):
@@ -561,7 +879,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
         sig_plot = signals.reindex(df.index)
         x = df.index
 
-        # ── Price panel ──────────────────────────────────────────────────────
         ax_p.plot(x, df['Close'],  color='#e6edf3', lw=1.3, zorder=3, label='Close')
         ax_p.plot(x, df['EMA21'],  color='#f0b429', lw=0.9, alpha=0.8, label='EMA21')
         ax_p.plot(x, df['EMA50'],  color='#58a6ff', lw=0.9, alpha=0.8, label='EMA50')
@@ -573,7 +890,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
         if 'SAR' in df.columns:
             ax_p.scatter(x, df['SAR'], s=1.5, color='#9e6eff', alpha=0.4, zorder=2)
 
-        # Support / Resistance lines
         for lvl in resistance:
             ax_p.axhline(lvl, color='#ff6b6b', lw=0.7, ls='--', alpha=0.6)
             ax_p.annotate(f'R ₹{lvl:,.0f}', xy=(x[-1], lvl),
@@ -585,24 +901,21 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                           xytext=(5, -8), textcoords='offset points',
                           fontsize=6, color='#26d07c', va='top')
 
-        # Darvas Boxes on daily chart
         for box in boxes_d[-5:]:
             try:
                 bs = pd.Timestamp(box['box_start'])
                 be = pd.Timestamp(box['box_end'])
                 if bs >= x[0]:
                     color = '#00ff88' if box['breakout'] else ('#ff4444' if box['breakdown'] else '#fbbf24')
-                    rect = mpl_patches.FancyArrowPatch
                     ax_p.axhspan(box['bottom'], box['top'],
-                                 xmin=max(0, (bs - x[0]).days / (x[-1] - x[0]).days),
-                                 xmax=min(1, (be - x[0]).days / (x[-1] - x[0]).days),
+                                 xmin=max(0, (bs - x[0]).days / max(1, (x[-1] - x[0]).days)),
+                                 xmax=min(1, (be - x[0]).days / max(1, (x[-1] - x[0]).days)),
                                  alpha=0.07, color=color, zorder=1)
                     ax_p.axhline(box['top'],    color=color, lw=0.7, ls='-',  alpha=0.5)
                     ax_p.axhline(box['bottom'], color=color, lw=0.5, ls='--', alpha=0.4)
             except Exception:
                 pass
 
-        # Buy/Sell markers
         SIG_COLORS = {
             'STRONG BUY': '#00ff88', 'MACD MEGA BUY': '#00d4ff',
             'BUY': '#26d07c',        'VOL BUY': '#fbbf24',
@@ -617,7 +930,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                              marker='v' if sv == 'SELL' else '^',
                              zorder=5, edgecolors='white', linewidths=0.25, label=sv)
 
-        # Fibonacci
         fib_colors = ['#fbbf24','#f97316','#ef4444','#dc2626']
         for fk, fc in zip(['fib_0618','fib_1618','fib_2618','fib_4236'], fib_colors):
             fv = fibs[fk]
@@ -640,7 +952,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
         ax_p.grid(True, alpha=0.25)
         ax_p.yaxis.tick_right()
 
-        # ── Volume ────────────────────────────────────────────────────────────
         vc = np.where(df['VOL_RATIO'] > BLAST_VOL_RATIO, '#fbbf24',
                       np.where(df['Close'] >= df['Open'], '#26d07c', '#ff6b6b'))
         ax_v.bar(x, df['Volume']/1e6, color=vc, alpha=0.8, width=1.2)
@@ -651,7 +962,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_v.grid(True, alpha=0.25)
 
-        # ── RSI ───────────────────────────────────────────────────────────────
         ax_r.plot(x, df['RSI'], color='#c084fc', lw=1.0, label='RSI(14)')
         ax_r.axhline(70, color='#ff6b6b', lw=0.6, ls='--', alpha=0.6)
         ax_r.axhline(50, color='#8b949e', lw=0.4, ls='-',  alpha=0.4)
@@ -664,7 +974,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_r.grid(True, alpha=0.25)
 
-        # ── MACD ──────────────────────────────────────────────────────────────
         ax_m.plot(x, df['MACD'],     color='#58a6ff', lw=0.9, label='MACD(12,26)')
         ax_m.plot(x, df['MACD_sig'], color='#f0b429', lw=0.8, ls='--', label='Sig(9)')
         hc = np.where(df['MACD_hist'] >= 0, '#26d07c', '#ff6b6b')
@@ -676,7 +985,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_m.grid(True, alpha=0.25)
 
-        # ── Ultra-slow MACD ───────────────────────────────────────────────────
         ax_u.plot(x, df['MACD_US'],     color='#00d4ff', lw=1.1, label='MACD(34,1000,20)')
         ax_u.plot(x, df['MACD_US_sig'], color='#ff9800', lw=0.8, ls='--', label='Sig(20)')
         uhc = np.where(df['MACD_US_hist'] >= 0, '#26d07c', '#ff6b6b')
@@ -699,7 +1007,7 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                     facecolor='#0d1117', edgecolor='none')
         plt.close(fig)
 
-# ── Chart: Weekly with S/R + Trend Channel + Darvas ──────────────────────────
+# ── Chart: Weekly ─────────────────────────────────────────────────────────────
 def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data, out_path):
     with plt.rc_context(MPLSTYLE):
         fig = plt.figure(figsize=(14, 9), facecolor='#0d1117')
@@ -708,7 +1016,7 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
         ax_r = fig.add_subplot(gs[1], sharex=ax_p)
         ax_v = fig.add_subplot(gs[2], sharex=ax_p)
 
-        df = df_w.tail(156).copy()   # ~3 years weekly
+        df = df_w.tail(156).copy()
         x  = df.index
 
         ax_p.plot(x, df['Close'], color='#e6edf3', lw=1.3, label='Close', zorder=3)
@@ -717,7 +1025,6 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
         ax_p.plot(x, df['EMA50'] if 'EMA50' in df else df['Close'].ewm(50).mean(),
                   color='#58a6ff', lw=0.9, label='EMA50', alpha=0.8)
 
-        # Trend Channel
         if channel_data:
             trend, upper, lower, idx = channel_data
             if len(idx) == len(trend):
@@ -726,7 +1033,6 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
                 ax_p.plot(idx, lower, color='#26d07c', lw=0.8, ls=':', alpha=0.6, label='Lower Ch')
                 ax_p.fill_between(idx, lower, upper, color='#9e6eff', alpha=0.04)
 
-        # S/R lines
         for lvl in resistance:
             ax_p.axhline(lvl, color='#ff6b6b', lw=0.9, ls='--', alpha=0.65)
             ax_p.annotate(f'R ₹{lvl:,.0f}', xy=(x[-1], lvl), xytext=(5, 2),
@@ -736,16 +1042,15 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
             ax_p.annotate(f'S ₹{lvl:,.0f}', xy=(x[-1], lvl), xytext=(5, -8),
                           textcoords='offset points', fontsize=6, color='#26d07c')
 
-        # Darvas Boxes
         for box in boxes_w[-4:]:
             try:
                 bs = pd.Timestamp(box['box_start'])
                 be = pd.Timestamp(box['box_end'])
                 if bs >= x[0]:
                     col = '#00ff88' if box['breakout'] else ('#ff4444' if box['breakdown'] else '#fbbf24')
-                    span = (x[-1] - x[0]).days
-                    xmin = max(0, (bs - x[0]).days / span) if span > 0 else 0
-                    xmax = min(1, (be - x[0]).days / span) if span > 0 else 1
+                    span = max(1, (x[-1] - x[0]).days)
+                    xmin = max(0, (bs - x[0]).days / span)
+                    xmax = min(1, (be - x[0]).days / span)
                     ax_p.axhspan(box['bottom'], box['top'], xmin=xmin, xmax=xmax,
                                  alpha=0.06, color=col)
                     ax_p.axhline(box['top'],    color=col, lw=0.8, ls='-',  alpha=0.5)
@@ -759,7 +1064,6 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
                     facecolor='#161b22', edgecolor='#30363d', labelcolor='#e6edf3')
         ax_p.grid(True, alpha=0.25); ax_p.yaxis.tick_right()
 
-        # RSI
         rsi_w = rsi(df['Close'], 14)
         ax_r.plot(x, rsi_w, color='#c084fc', lw=1.0, label='RSI(14)')
         ax_r.axhline(70, color='#ff6b6b', lw=0.5, ls='--', alpha=0.6)
@@ -773,7 +1077,6 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_r.grid(True, alpha=0.25)
 
-        # Volume
         vc = np.where(df['Close'] >= df['Open'], '#26d07c', '#ff6b6b')
         ax_v.bar(x, df['Volume']/1e6, color=vc, alpha=0.75, width=5)
         ax_v.set_ylabel('Vol(M)', color='#8b949e', fontsize=6.5)
@@ -788,7 +1091,7 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
                     facecolor='#0d1117', edgecolor='none')
         plt.close(fig)
 
-# ── Chart: Monthly with S/R + Trend Channel + Darvas ─────────────────────────
+# ── Chart: Monthly ────────────────────────────────────────────────────────────
 def chart_monthly(ticker, name, df_m, boxes_m, resistance, support, channel_data, out_path):
     with plt.rc_context(MPLSTYLE):
         fig = plt.figure(figsize=(14, 9), facecolor='#0d1117')
@@ -797,14 +1100,13 @@ def chart_monthly(ticker, name, df_m, boxes_m, resistance, support, channel_data
         ax_r = fig.add_subplot(gs[1], sharex=ax_p)
         ax_v = fig.add_subplot(gs[2], sharex=ax_p)
 
-        df = df_m.tail(120).copy()  # 10 years monthly
+        df = df_m.tail(120).copy()
         x  = df.index
 
         ax_p.plot(x, df['Close'], color='#e6edf3', lw=1.5, label='Close', zorder=3)
         ax_p.plot(x, df['Close'].ewm(12).mean(), color='#f0b429', lw=1.0, label='EMA12', alpha=0.8)
         ax_p.plot(x, df['Close'].ewm(26).mean(), color='#58a6ff', lw=1.0, label='EMA26', alpha=0.8)
 
-        # Trend Channel
         if channel_data:
             trend, upper, lower, idx = channel_data
             if len(idx) == len(trend):
@@ -813,7 +1115,6 @@ def chart_monthly(ticker, name, df_m, boxes_m, resistance, support, channel_data
                 ax_p.plot(idx, lower, color='#26d07c', lw=1.0, ls=':', alpha=0.65, label='Lower')
                 ax_p.fill_between(idx, lower, upper, color='#9e6eff', alpha=0.05)
 
-        # S/R
         for lvl in resistance:
             ax_p.axhline(lvl, color='#ff6b6b', lw=1.0, ls='--', alpha=0.65)
             ax_p.annotate(f'R ₹{lvl:,.0f}', xy=(x[-1], lvl), xytext=(5, 2),
@@ -823,16 +1124,15 @@ def chart_monthly(ticker, name, df_m, boxes_m, resistance, support, channel_data
             ax_p.annotate(f'S ₹{lvl:,.0f}', xy=(x[-1], lvl), xytext=(5, -9),
                           textcoords='offset points', fontsize=6.5, color='#26d07c')
 
-        # Darvas Boxes
         for box in boxes_m[-4:]:
             try:
                 bs = pd.Timestamp(box['box_start'])
                 be = pd.Timestamp(box['box_end'])
                 if bs >= x[0]:
                     col = '#00ff88' if box['breakout'] else ('#ff4444' if box['breakdown'] else '#fbbf24')
-                    span = (x[-1] - x[0]).days
-                    xmin = max(0, (bs - x[0]).days / span) if span > 0 else 0
-                    xmax = min(1, (be - x[0]).days / span) if span > 0 else 1
+                    span = max(1, (x[-1] - x[0]).days)
+                    xmin = max(0, (bs - x[0]).days / span)
+                    xmax = min(1, (be - x[0]).days / span)
                     ax_p.axhspan(box['bottom'], box['top'], xmin=xmin, xmax=xmax,
                                  alpha=0.07, color=col)
                     ax_p.axhline(box['top'],    color=col, lw=1.0, ls='-',  alpha=0.5)
@@ -875,9 +1175,9 @@ def chart_monthly(ticker, name, df_m, boxes_m, resistance, support, channel_data
 
 # ── Process One Stock ─────────────────────────────────────────────────────────
 def process_stock(name, ticker):
-    """Full pipeline for one stock. Returns result dict or None on failure."""
+    """Full pipeline for one stock. Reads data from the pre-fetched cache."""
     try:
-        df_raw = fetch_data(ticker)
+        df_raw = fetch_data_from_cache(ticker)
         if df_raw is None:
             return None
 
@@ -885,40 +1185,34 @@ def process_stock(name, ticker):
         df_w = add_indicators(resample_weekly(df_raw))
         df_m = add_indicators(resample_monthly(df_raw))
 
-        if len(df_d) < 60 or len(df_w) < 20 or len(df_m) < 12:
+        # IPO-friendly: lower thresholds — even 30 daily bars is enough to scan
+        if len(df_d) < MIN_DAILY or len(df_w) < MIN_WEEKLY or len(df_m) < MIN_MONTHLY:
             return None
 
-        # Signals & Backtest
-        signals   = generate_signals(df_d, df_w, df_m)
-        trades    = backtest(df_d, signals)
-        fibs      = fibonacci_targets(df_d)
+        signals = generate_signals(df_d, df_w, df_m)
+        trades  = backtest(df_d, signals)
+        fibs    = fibonacci_targets(df_d)
 
-        # Support/Resistance on daily, weekly, monthly
-        res_d, sup_d = find_support_resistance(df_d.tail(252), window=8)
-        res_w, sup_w = find_support_resistance(df_w.tail(104), window=5)
-        res_m, sup_m = find_support_resistance(df_m.tail(60),  window=3)
+        # Adaptive window for short-history stocks
+        sr_window  = min(8,  max(3, len(df_d) // 30))
+        res_d, sup_d = find_support_resistance(df_d.tail(min(252, len(df_d))), window=sr_window)
+        res_w, sup_w = find_support_resistance(df_w.tail(min(104, len(df_w))), window=max(3, sr_window-2))
+        res_m, sup_m = find_support_resistance(df_m.tail(min(60, len(df_m))),  window=max(2, sr_window-3))
 
-        # Trend Channels
-        ch_w = trend_channel(df_w, lookback=60)
-        ch_m = trend_channel(df_m, lookback=40)
+        ch_w = trend_channel(df_w, lookback=min(60, len(df_w)))
+        ch_m = trend_channel(df_m, lookback=min(40, len(df_m)))
 
-        # Darvas Boxes
-        boxes_d = darvas_boxes(df_d.tail(252),  confirm_days=3)
-        boxes_w = darvas_boxes(df_w.tail(104),  confirm_days=3)
-        boxes_m = darvas_boxes(df_m.tail(60),   confirm_days=2)
+        boxes_d = darvas_boxes(df_d.tail(min(252, len(df_d))), confirm_days=3)
+        boxes_w = darvas_boxes(df_w.tail(min(104, len(df_w))), confirm_days=3)
+        boxes_m = darvas_boxes(df_m.tail(min(60,  len(df_m))), confirm_days=2)
 
-        # Darvas summary
         dv_d_status, dv_d_top, dv_d_bot = darvas_latest_status(boxes_d)
         dv_w_status, dv_w_top, dv_w_bot = darvas_latest_status(boxes_w)
         dv_m_status, dv_m_top, dv_m_bot = darvas_latest_status(boxes_m)
 
-        # Blast
         is_blast, blast_score, blast_reason = detect_blast(df_d, res_d)
-
-        # Score
         score = compute_score(df_d, df_w, df_m, signals, is_blast)
 
-        # Key metrics
         cur_price  = float(df_d['Close'].iloc[-1])
         ath_val    = float(df_d['ATH'].iloc[-1])
         ath_pct    = float(df_d['ATH_PCT'].iloc[-1])
@@ -930,16 +1224,14 @@ def process_stock(name, ticker):
         adx_val    = float(df_d['ADX'].iloc[-1]) if not pd.isna(df_d['ADX'].iloc[-1]) else 0
         last_sig   = signals.iloc[-1]
 
-        # Backtest stats
-        closed = [t for t in trades if not t.get('open')]
+        closed   = [t for t in trades if not t.get('open')]
         win_rate = 0.0
         avg_ret  = 0.0
         if closed:
-            wins = [t for t in closed if t['return_pct'] > 0]
+            wins     = [t for t in closed if t['return_pct'] > 0]
             win_rate = len(wins) / len(closed) * 100
             avg_ret  = np.mean([t['return_pct'] for t in closed])
 
-        # Save charts
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         safe_sym = ticker.replace('.NS','').replace('.BO','')
         path_d = CHARTS_DIR / f"{safe_sym}_daily.png"
@@ -959,18 +1251,14 @@ def process_stock(name, ticker):
             'signal': last_sig, 'score': score,
             'trades': len(trades), 'win_rate': win_rate, 'avg_ret': avg_ret,
             'fibs': fibs,
-            # Blast
             'blast': is_blast, 'blast_score': blast_score, 'blast_reason': blast_reason,
-            # Support / Resistance
             'res_d': [round(r, 2) for r in res_d[:3]],
             'sup_d': [round(s, 2) for s in sup_d[:3]],
             'res_w': [round(r, 2) for r in res_w[:3]],
             'sup_w': [round(s, 2) for s in sup_w[:3]],
-            # Darvas
             'darvas_d': dv_d_status, 'darvas_d_top': dv_d_top, 'darvas_d_bot': dv_d_bot,
             'darvas_w': dv_w_status, 'darvas_w_top': dv_w_top, 'darvas_w_bot': dv_w_bot,
             'darvas_m': dv_m_status, 'darvas_m_top': dv_m_top, 'darvas_m_bot': dv_m_bot,
-            # Chart paths
             'chart_d': f"/charts/multibagger/{safe_sym}_daily.png",
             'chart_w': f"/charts/multibagger/{safe_sym}_weekly.png",
             'chart_m': f"/charts/multibagger/{safe_sym}_monthly.png",
@@ -1039,7 +1327,6 @@ def build_html(results, scan_time, total_scanned, total_ok):
     mrsi70_cnt  = sum(1 for r in results if r['m_rsi'] > 70)
     avg_score   = np.mean([r['score'] for r in results]) if results else 0
 
-    # Sort by score desc
     results_sorted = sorted(results, key=lambda x: -x['score'])
 
     rows_html = []
@@ -1137,7 +1424,6 @@ tbody tr:hover{{background:#161b2255}}
 .blast-row{{background:#1a0a0033}}
 .blast-row:hover{{background:#1a0a0066}}
 .hidden{{display:none}}
-/* Modal */
 #chartModal{{display:none;position:fixed;inset:0;background:#000000cc;z-index:9999;
              align-items:center;justify-content:center}}
 #chartModal.open{{display:flex}}
@@ -1156,7 +1442,6 @@ tbody tr:hover{{background:#161b2255}}
 #modalImgWrap{{overflow:auto;flex:1;display:flex;align-items:center;justify-content:center;padding:8px}}
 #modalImg{{max-width:100%;height:auto;border-radius:4px}}
 #modalLoading{{padding:40px;color:#8b949e;font-size:14px}}
-/* Darvas legend */
 .darvas-legend{{display:flex;gap:12px;font-size:11px;color:#8b949e;margin-left:auto}}
 .dl{{display:flex;align-items:center;gap:4px}}
 .dl-dot{{width:10px;height:10px;border-radius:2px}}
@@ -1256,13 +1541,10 @@ tbody tr:hover{{background:#161b2255}}
 </div>
 
 <script>
-// ── State ─────────────────────────────────────────────────────────────────────
 let activeFilter = null;
-let sortCol = 10, sortDir = -1;  // default: sort by score desc
-
+let sortCol = 10, sortDir = -1;
 let currentSym = '', currentUrls = {{}};
 
-// ── Filter ────────────────────────────────────────────────────────────────────
 function filterTable() {{
   const q    = document.getElementById('searchBox').value.toLowerCase();
   const rows = document.querySelectorAll('#tableBody .stock-row');
@@ -1301,7 +1583,6 @@ function clearFilters() {{
   filterTable();
 }}
 
-// ── Sort ──────────────────────────────────────────────────────────────────────
 function sortTable(col, type) {{
   if (sortCol === col) sortDir *= -1;
   else {{ sortCol = col; sortDir = -1; }}
@@ -1316,13 +1597,10 @@ function sortTable(col, type) {{
   rows.forEach(r => tbody.appendChild(r));
 }}
 
-// ── Chart Modal ───────────────────────────────────────────────────────────────
 function showChart(sym, tab, url) {{
   currentSym  = sym;
   const suffix = tab.toLowerCase() === 'daily'   ? 'd' :
                  tab.toLowerCase() === 'weekly'  ? 'w' : 'm';
-  // Build all 3 URLs from the daily URL pattern
-  const base = url.replace(/_daily|_weekly|_monthly/, '');
   currentUrls = {{
     d: `/charts/multibagger/${{sym}}_daily.png`,
     w: `/charts/multibagger/${{sym}}_weekly.png`,
@@ -1395,59 +1673,59 @@ def push_to_github():
     except Exception as e:
         tprint(f"  ⚠️  GitHub push error: {e}")
 
-# ── Progress Cache ────────────────────────────────────────────────────────────
-def load_cache():
-    if CACHE_FILE.exists():
-        try:
-            with open(CACHE_FILE, 'r') as f:
-                data = json.load(f)
-            tprint(f"  📂 Loaded cache: {len(data)} stocks")
-            return data
-        except Exception:
-            pass
-    return {}
-
-def save_cache(cache):
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_FILE, 'w') as f:
-        json.dump(cache, f)
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
-    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    t0 = time.time()
+
+    ist_now   = datetime.utcnow() + timedelta(hours=5, minutes=30)
     scan_time = ist_now.strftime('%Y-%m-%d %H:%M IST')
 
-    tprint(f"\n🚀 Full NSE Scan — {scan_time}")
+    tprint(f"\n🚀 Full NSE Multibagger Scan — {scan_time}")
     tprint(f"   Charts → {CHARTS_DIR.resolve()}\n")
 
-    # Load stock universe
+    # ── Step 1: Load stock universe ──────────────────────────────────────────
     stocks = load_nse_stocks()
     total_scanned = len(stocks)
     tprint(f"\n  📊 Total: {total_scanned} stocks to scan\n")
 
-    # Load progress cache (so we can resume if interrupted)
-    cache = load_cache()
-    today_str = ist_now.strftime('%Y-%m-%d')
+    # ── Step 2: Load smart pickle cache ─────────────────────────────────────
+    _mb_load_cache()
+    cached_count = sum(
+        1 for k, v in _MB_CACHE.items()
+        if not k.startswith("__") and isinstance(v, dict) and isinstance(v.get("df"), pd.DataFrame)
+    )
+    tprint(f"  📦 Loaded cache: {cached_count} tickers already have data\n")
 
-    # Determine which stocks need fetching
-    items = list(stocks.items())  # [(name, ticker), ...]
+    # ── Step 3: Pre-fetch ALL tickers in batches ─────────────────────────────
+    # bare tickers (without .NS): used as cache keys
+    tickers_bare = [t.replace(".NS", "").replace(".BO", "") for t in stocks.values()]
 
-    results = []
-    ok_count = 0
+    tprint("=" * 60)
+    tprint("  PHASE 1 — BATCH DATA DOWNLOAD")
+    tprint("=" * 60)
+    prefetch_stats = prefetch_all_mb(tickers_bare)
+    t1 = time.time()
+    tprint(f"  ⏱  Download phase: {(t1-t0)/60:.1f} min\n")
+
+    # ── Step 4: Parallel analysis (pure CPU — reads from cache) ──────────────
+    tprint("=" * 60)
+    tprint(f"  PHASE 2 — ANALYSIS ({MAX_WORKERS} parallel workers)")
+    tprint("=" * 60)
+
+    items      = list(stocks.items())   # [(name, ticker.NS), ...]
+    results    = []
+    ok_count   = 0
     fail_count = 0
-    done = 0
+    done       = 0
 
     def worker(args):
         name, ticker = args
         result = process_stock(name, ticker)
         return name, ticker, result
 
-    tprint(f"  🔄 Starting parallel scan ({MAX_WORKERS} workers)…\n")
-
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
         futures = {exe.submit(worker, item): item for item in items}
-
         for fut in as_completed(futures):
             done += 1
             try:
@@ -1456,25 +1734,21 @@ def main():
                     results.append(result)
                     ok_count += 1
                     blast_tag = ' 🚀 BLAST' if result['blast'] else ''
-                    if done % 50 == 0 or result['blast']:
+                    if done % 100 == 0 or result['blast']:
                         tprint(f"  [{done}/{total_scanned}] ✅ {ticker}: "
                                f"Score={result['score']} | {result['signal']}{blast_tag}")
                 else:
                     fail_count += 1
-                    if done % 100 == 0:
-                        tprint(f"  [{done}/{total_scanned}] ❌ {ticker}: no data")
             except Exception as e:
                 fail_count += 1
                 tprint(f"  ⚠️  Worker error: {e}")
 
-            # Save cache periodically
-            if done % 200 == 0:
-                save_cache({'date': today_str, 'count': ok_count, 'done': done})
-                tprint(f"\n  💾 Progress: {done}/{total_scanned} scanned, {ok_count} OK\n")
+    t2 = time.time()
+    tprint(f"\n✅ Analysis complete: {ok_count} stocks processed, {fail_count} skipped")
+    tprint(f"   ⏱  Analysis phase: {(t2-t1)/60:.1f} min")
 
-    tprint(f"\n✅ Scan complete: {ok_count} stocks processed, {fail_count} skipped")
+    # ── Step 5: Build & save HTML ────────────────────────────────────────────
     tprint(f"\n📝 Building HTML report…")
-
     html = build_html(results, scan_time, total_scanned, ok_count)
     with open(REPORT_HTML, 'w', encoding='utf-8') as f:
         f.write(html)
@@ -1483,12 +1757,13 @@ def main():
     tprint(f"✅ Report saved: {REPORT_HTML} ({size_mb:.1f} MB)")
     tprint(f"   → {ok_count} stocks | {sum(1 for r in results if r['blast'])} BLAST signals")
 
-    # GitHub push
+    # ── Step 6: Push to GitHub ───────────────────────────────────────────────
     tprint(f"\n📤 Pushing to GitHub…")
     push_to_github()
 
-    save_cache({'date': today_str, 'count': ok_count, 'done': total_scanned, 'complete': True})
-    tprint(f"\n🎉 Done! View at /multibagger\n")
+    total_time = (time.time() - t0) / 60
+    tprint(f"\n🎉 Done! Total time: {total_time:.1f} min | View at /multibagger\n")
+
 
 if __name__ == '__main__':
     main()
