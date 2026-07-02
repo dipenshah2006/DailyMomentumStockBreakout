@@ -1,6 +1,6 @@
 # 📈 DailyMomentumStockBreakout
 
-Automated NSE stock analysis toolkit that generates daily HTML reports and emails them every morning — covering RSI Multi-Timeframe, ATH Breakouts, Multibagger picks, Rocket Scanner, and Intraday breakouts for Indian equity markets.
+Automated NSE stock analysis toolkit that generates daily HTML reports and emails them every morning — covering RSI Multi-Timeframe, ATH Breakouts, Multibagger picks, Rocket Scanner, F&O Multi-Indicator Scanner, and Intraday breakouts for Indian equity markets.
 
 ---
 
@@ -12,10 +12,13 @@ The Flask dashboard runs on Replit and provides admin controls not available on 
 
 | Page | URL |
 |------|-----|
-| 📊 Dashboard (main report) | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ |
-| ⚙️ Admin panel | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/subscribers |
+| 📊 Dashboard (main RSI report) | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ |
+| 📊 F&O Multi-Indicator Scanner | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/fo |
+| 💎 Multibagger Report | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/multibagger |
 | 🏆 ATH Breakout | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ath |
 | 🚀 Rocket Scanner | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/rocket |
+| ⚡ Intraday Breakout | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/intraday |
+| ⚙️ Admin panel | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/subscribers |
 
 **Admin panel** (`/subscribers`) requires the `ADMIN_PASSWORD` secret. From there you can:
 - View, add, remove, and bulk-import subscribers
@@ -29,11 +32,14 @@ The Flask dashboard runs on Replit and provides admin controls not available on 
 
 ### 📡 GitHub Pages (always-on, no login needed)
 
-| Report | URL |
-|--------|-----|
+Updated fresh every day at **5:00 AM IST** via GitHub Actions.
+
+| Report | GitHub Pages URL |
+|--------|-----------------|
 | 📈 RSI Multi-Timeframe Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/ |
-| 🏆 ATH Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/ath.html |
+| 📊 F&O Multi-Indicator Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/fo.html |
 | 💎 Multibagger | https://dipenshah2006.github.io/DailyMomentumStockBreakout/multibagger.html |
+| 🏆 ATH Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/ath.html |
 | 🚀 Rocket Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/rocket.html |
 | ⚡ Intraday Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/intraday.html |
 
@@ -41,17 +47,20 @@ The Flask dashboard runs on Replit and provides admin controls not available on 
 
 ---
 
-## 📅 Automated Email Schedule
+## 📅 Automated Schedule
 
-| Time (IST) | Days | Email |
-|-----------|------|-------|
-| 5:00 AM | Mon – Sat | 📈 RSI MTF Breakout Report |
-| 5:00 AM | Mon – Sat | 🏆 ATH Breakout Report |
-| 5:00 AM | Mon – Sat | 💎 Multibagger Report |
-| 5:00 AM | Mon – Sat | 🚀 Rocket Scanner Report |
-| 9:30 AM | Mon – Fri | ⚡ Intraday Breakout Report |
+All morning reports run via GitHub Actions at **5:00 AM IST** daily.
 
-All emails are sent to everyone listed in `email_recipients.txt`.
+| Time (IST) | Report | Ready ~by |
+|-----------|--------|-----------|
+| 5:00 AM | 📈 RSI MTF Breakout (2657 stocks) | 5:10–5:15 AM |
+| 5:00 AM | 🏆 ATH Breakout | 5:15 AM |
+| 5:00 AM | 💎 Multibagger | 5:20 AM |
+| 5:00 AM | 🚀 Rocket Scanner | 5:25 AM |
+| 5:00 AM | 📊 **F&O Scanner** (~212 stocks) | **5:30–5:40 AM** |
+| 9:30 AM (Mon–Fri) | ⚡ Intraday Breakout | 9:35 AM |
+
+All reports are emailed to everyone listed in `email_recipients.txt`.
 
 ---
 
@@ -60,7 +69,8 @@ All emails are sent to everyone listed in `email_recipients.txt`.
 ```
 DailyMomentumStockBreakout/
 │
-├── rsi_mtf_report_nse.py          # NSE RSI Multi-Timeframe Report (main script)
+├── rsi_mtf_report_nse.py          # NSE RSI Multi-Timeframe Report (main — 2657 stocks)
+├── fo_scanner_report.py           # F&O Multi-Indicator Scanner (~212 stocks, 12 indicators)
 ├── ath_report.py                  # ATH Breakout scanner — stocks at or near all-time highs
 ├── multibagger_report.py          # Multibagger scanner — long-term compounders
 ├── rocket_scanner.py              # Rocket Scanner — explosive momentum breakouts
@@ -78,13 +88,16 @@ DailyMomentumStockBreakout/
 │       │   └── EQUITY_L.csv               # NSE EQ-series master list (~2,360 stocks)
 │       ├── NSESME/
 │       │   └── MW-SME-*.csv               # NSE SME stocks (ST + SM series)
+│       ├── nse_fo_list.csv                # F&O eligible stocks (~212 symbols)
 │       └── NIFTY_Indices_Master.xlsx      # Nifty index constituents + sector/industry map
 │
-├── charts/                        # Generated PNG charts (served via GitHub raw URLs)
+├── charts/                        # Generated PNG charts (served via /charts/ route)
+│   ├── multibagger/               # Multibagger daily charts
+│   └── fo/                        # F&O scanner charts (daily 5-panel + 15-min Fibonacci)
 │
 └── .github/
     └── workflows/
-        ├── generate-report.yml    # Morning reports — runs Mon–Sat at 5:00 AM IST
+        ├── generate-report.yml    # Morning reports — runs daily at 5:00 AM IST
         └── intraday-report.yml    # Intraday report — runs Mon–Fri at 9:30 AM IST
 ```
 
@@ -94,7 +107,7 @@ DailyMomentumStockBreakout/
 
 ### 1. `rsi_mtf_report_nse.py` — RSI MTF Report (NSE)
 
-Scans the full NSE EQ + SME universe across **Daily / Weekly / Monthly** timeframes.
+Scans the full NSE EQ + SME universe (~2,657 stocks) across **Daily / Weekly / Monthly** timeframes.
 
 **Indicators calculated:**
 | Indicator | Period | Timeframes |
@@ -108,79 +121,84 @@ Scans the full NSE EQ + SME universe across **Daily / Weekly / Monthly** timefra
 | Bollinger Bands | 20 | Daily |
 | MFI | 14 | Daily |
 
-**Signals generated:**
-- Phase detection: Uptrend / Sideways / Bearish
-- RSI/SMA crossover: Strong Buy 🚀 / Buy / Watch / Sell
-- All-Time High (ATH) proximity tagging
-- Explosive breakout scoring (volume surge + BB breakout + MACD acceleration)
-- Fibonacci extension targets (127.2% and 161.8%)
-- Ranking vs Nifty50 (percentile)
-- 52-week high/low % distance
-
-**Output:** `rsi_mtf_report_NSE.html` → deployed to GitHub Pages as `index.html`
+**Output:** `rsi_mtf_report_NSE.html` → GitHub Pages `index.html`
 
 ---
 
-### 2. `ath_report.py` — ATH Breakout Report
+### 2. `fo_scanner_report.py` — F&O Multi-Indicator Scanner 🆕
 
-Scans all 2,360 NSE EQ stocks and identifies those at or near their **all-time highs**.
+Scans **~212 NSE F&O stocks** with 12 advanced indicators and generates individual charts.
+Reuses the shared `stock_data_cache.pkl` — zero redundant downloads when run after the RSI report.
 
-**Columns:**
-| Column | Description |
-|--------|-------------|
-| ATH Status | 🏆 AT ATH badge or proximity category |
-| % vs ATH | Exact % above (green) or below (red) the all-time high |
-| ATH Price / Date | Price and date the ATH was made |
-| ↑ 52W Low | % the stock has risen from its 52-week low |
-| ↑ ATH from Low | % the ATH price is above the all-time historical low |
-| RSI D / W / M | Multi-timeframe RSI |
-| Vol Ratio | Today's volume vs 20-day average |
-| Phase | 📈 UPTREND / ➡️ SIDEWAYS / 📉 BEARISH |
+**Signals & indicators:**
+| Indicator | Signal |
+|-----------|--------|
+| RSI(7) crosses above RSI(34) | ✅ BUY |
+| RSI(7) crosses RSI(34) + RSI(200) > 50 | 🔥 STRONG BUY |
+| RSI(7) crosses above 70 | ⚡ MOMENTUM |
+| MACD(34, 200, 9) bullish crossover | 📈 MACD Cross |
+| Chande Kroll Stop (ATR-10, ×1, stop-9) | 🛡️ CK Bullish |
+| Volume Oscillator (EMA5−EMA10) zero-cross ↑ | 📊 Vol Osc |
+| Bollinger Band (20, 2) upper breakout | 🚀 BB Break |
+| Donchian Channel (20-bar) breakout | 💎 Donchian Break |
+| Darvas Box top breakout | 🎯 Darvas Break |
+| Trend Channel (Linear Regression ±2σ) | 📐 Channel |
+| Support / Resistance (pivot clustering) | — overlaid on chart |
+| Fibonacci Extension + Retracement (15-min) | 📐 15-min Fib chart |
 
-**Filters:** 🏆 AT ATH · ✅ <5% · 🟡 <10% · 🟠 <20% · 📉 >20% · Phase buttons · Search
+**Scoring:** Each signal adds points (0–100). Stocks ranked by score.
 
-**Output:** `ath_report_NSE.html` → deployed as `ath.html`
+| Score | Signal Tag |
+|-------|-----------|
+| ≥ 60 | 🔥 STRONG BUY |
+| ≥ 40 | ✅ BUY |
+| ≥ 25 | 📈 BULLISH |
+| ≥ 10 | 👀 WATCH |
+| < 10 | — HOLD |
+
+**Charts generated (top 60 stocks):**
+- `charts/fo/<SYM>.png` — 5-panel daily chart (candlestick + BB + Donchian + CK Stop + trend channel + RSI + MACD + Vol Osc + Volume)
+- `charts/fo/<SYM>_15m.png` — 15-min chart with Fibonacci Extension (bullish targets) and Retracement (bearish targets)
+
+**Output:** `fo_report.html` → GitHub Pages `fo.html` — available at ~5:30–5:40 AM IST daily
 
 ---
 
-### 3. `multibagger_report.py` — Multibagger Report
+### 3. `ath_report.py` — ATH Breakout Report
 
-Scans for long-term compounders — stocks with consistent revenue/price growth over 3–5 years.
+Scans all NSE EQ stocks and identifies those at or near their **all-time highs**.
 
-**Output:** `multibagger_report.html` → deployed as `multibagger.html`
+**Output:** `ath_report_NSE.html` → GitHub Pages `ath.html`
 
 ---
 
-### 4. `rocket_scanner.py` — Rocket Scanner
+### 4. `multibagger_report.py` — Multibagger Report
+
+Scans for long-term compounders — stocks with consistent growth over 3–5 years.
+
+**Output:** `multibagger_report.html` → GitHub Pages `multibagger.html`
+
+---
+
+### 5. `rocket_scanner.py` — Rocket Scanner
 
 Identifies stocks with explosive momentum: high RSI + volume surge + price breakout alignment.
 
-**Output:** `rocket_scan_latest.html` → deployed as `rocket.html`
+**Output:** `rocket_scan_latest.html` → GitHub Pages `rocket.html`
 
 ---
 
-### 5. `intraday_report.py` — Intraday Breakout Scanner
+### 6. `intraday_report.py` — Intraday Breakout Scanner
 
 Runs at **9:30 AM IST** (Mon–Fri). Scans top 500 NSE stocks using live 5-minute bars.
 
-**Signals detected:**
-| Signal | Description |
-|--------|-------------|
-| 🟢 PDH Breakout | Price crossed above previous day's high + 0.2% buffer with volume |
-| 🔵 VWAP Breakout | Price trading above intraday VWAP |
-| 🟡 ORH Breakout | Price broke above opening range high (first 15 min) |
+**Signals:** PDH Breakout 🟢 · VWAP Breakout 🔵 · ORH Breakout 🟡
 
-**Score 0–100** — weighted combination of all signals + volume surge + daily RSI trend.
-
-**Columns:** Price · Signals · % vs PDH · PDH ₹ · % vs VWAP · VWAP ₹ · RSI(D) · Vol Ratio · Score
-
-**Filters:** All · PDH Only · VWAP Only · Score ≥ 70 · F&O Only
-
-**Output:** `intraday_report_NSE.html` → emailed at 9:30 AM IST (not hosted on Pages, changes throughout day)
+**Output:** `intraday_report_NSE.html` → emailed at 9:30 AM IST
 
 ---
 
-### 6. `send_report_email.py` — Bulk Emailer
+### 7. `send_report_email.py` — Bulk Emailer
 
 Sends reports to any number of subscribers using Gmail SMTP.
 
@@ -206,7 +224,7 @@ Sends reports to any number of subscribers using Gmail SMTP.
 
 ---
 
-### 7. `email_recipients.txt` — Mailing List
+### 8. `email_recipients.txt` — Mailing List
 
 One email address per line. Lines starting with `#` and blank lines are ignored.
 
@@ -216,12 +234,6 @@ dipenshah2006@gmail.com
 tradewithtrenddirection@gmail.com
 # another@example.com   ← commented out / paused
 ```
-
-**To manage subscribers:**
-- **Add** → append a line
-- **Remove** → delete the line
-- **Pause** → prefix with `#`
-- **One-off override** → use the `email_list` input when triggering manually from GitHub Actions
 
 ---
 
@@ -255,11 +267,11 @@ Edit `email_recipients.txt` — add one address per line, commit and push.
 
 ### Workflow triggers
 
-**Morning workflow (`generate-report.yml`) — Mon–Sat 5:00 AM IST:**
+**Morning workflow (`generate-report.yml`) — daily 5:00 AM IST:**
 
 | Trigger | When |
 |---------|------|
-| 📅 Schedule | Every Mon–Sat at **5:00 AM IST** (11:30 PM UTC) |
+| 📅 Schedule | Every day at **5:00 AM IST** (11:30 PM UTC) |
 | 📂 CSV update | Whenever `india/NSE/**` files are pushed |
 | 🖱️ Manual | Actions tab → Run workflow |
 
@@ -290,6 +302,9 @@ pip install -r requirements.txt
 
 # Run full NSE RSI report (best after 3:35 PM IST on trading days)
 python rsi_mtf_report_nse.py
+
+# Run F&O Multi-Indicator Scanner
+python fo_scanner_report.py
 
 # Run ATH Breakout report
 python ath_report.py
@@ -332,6 +347,6 @@ pytz           # IST timezone handling
 - **Intraday scanner:** Run during market hours (9:15 AM – 3:30 PM IST) for live data
 - **NSE data:** yfinance uses Yahoo Finance (`.NS` suffix) — no NSE API key needed
 - **Rate limiting:** Scripts batch downloads with pauses to avoid blocks
-- **Caching:** `rsi_mtf_report_nse.py` caches OHLCV data to `stock_data_cache.pkl` for faster reruns
-- **GitHub Actions runtime:** Full 2,000+ stock morning run takes ~45–60 min (within 2-hour cap)
+- **Shared cache:** `stock_data_cache.pkl` is reused by RSI, Multibagger, and F&O scanner — only one download per day
+- **GitHub Actions runtime:** Full morning run (all 5 reports) takes ~35–45 min once cache is warm
 - **Gmail limits:** Regular Gmail ≈ 500 emails/day · Google Workspace ≈ 2,000/day · BCC batch=100 minimises SMTP calls
