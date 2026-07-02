@@ -1,9 +1,6 @@
 name: Generate NSE RSI Report
 
 on:
-  push:
-    paths:
-      - 'india/NSE/**'           # triggers when CSV files are updated
   schedule:
     - cron: '30 23 * * *'       # 5:00 AM IST every day = 11:30 PM UTC
   workflow_dispatch:             # manual trigger from GitHub UI
@@ -39,8 +36,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: nse-report
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # opt-in before June 16 2026 forced migration
