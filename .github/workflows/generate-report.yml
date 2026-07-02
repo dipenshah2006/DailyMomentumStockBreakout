@@ -144,6 +144,14 @@ jobs:
           PYTHONUNBUFFERED: '1'
         run: python rocket_scanner.py || echo "⚠️  Rocket scanner failed — continuing"
 
+      # ── 8e. Run F&O Multi-Indicator Scanner ───────────────────────────────
+      - name: Run F&O Scanner
+        id: fo_scanner
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python fo_scanner_report.py || echo "⚠️  F&O scanner failed — continuing"
+
       # ── 9. Verify & prepare GitHub Pages ──────────────────────────────────
       - name: Prepare GitHub Pages output
         run: |
@@ -183,6 +191,19 @@ jobs:
             echo "✅ Multibagger report copied: $(du -sh multibagger_report.html | cut -f1)"
           else
             echo "⚠️  multibagger_report.html not found — skipping"
+          fi
+
+          if [ -f "fo_report.html" ]; then
+            cp fo_report.html _site/fo.html
+            echo "✅ F&O scanner report copied: $(du -sh fo_report.html | cut -f1)"
+          else
+            echo "⚠️  fo_report.html not found — skipping"
+          fi
+
+          if [ -d "charts/fo" ] && ls charts/fo/*.png &>/dev/null 2>&1; then
+            mkdir -p _site/charts/fo
+            cp -r charts/fo/ _site/charts/fo/
+            echo "✅ F&O charts: $(ls charts/fo/*.png | wc -l) files"
           fi
 
           ls error_log_*.txt &>/dev/null && cp error_log_*.txt _site/ || true

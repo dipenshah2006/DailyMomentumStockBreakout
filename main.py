@@ -453,6 +453,25 @@ def rocket():
         return Response(f.read(), mimetype='text/html')
 
 
+@app.route('/fo')
+def fo():
+    path = 'fo_report.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">📊 F&amp;O Multi-Indicator Scanner</h2>'
+            '<p style="color:#94a3b8;">No F&amp;O report yet. Run <code>python fo_scanner_report.py</code> to generate it.</p>'
+            '<p style="color:#64748b;font-size:0.85rem;margin-top:12px;">Indicators: RSI(7/34/200) crossovers · MACD(34,200,9) · '
+            'Chande Kroll Stop · Volume Oscillator · Darvas Box · Bollinger Band · '
+            'Donchian Channel · Trend Channel · S/R Levels · Fibonacci Extension &amp; Retracement (15-min)</p>'
+            '<a href="/" style="color:#38bdf8;margin-top:20px;display:inline-block;">← Back to Full Report</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
 @app.route('/intraday')
 def intraday():
     path = 'intraday_report_NSE.html'
