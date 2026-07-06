@@ -2,7 +2,7 @@ name: Generate NSE RSI Report
 
 on:
   schedule:
-    - cron: '30 23 * * *'       # 5:00 AM IST every day = 11:30 PM UTC
+    - cron: '30 15 * * *'       # 9:00 PM IST every day = 3:30 PM UTC
   workflow_dispatch:             # manual trigger from GitHub UI
     inputs:
       max_chart_stocks:
@@ -45,7 +45,7 @@ env:
 jobs:
   generate-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     environment:
       name: github-pages
@@ -343,9 +343,9 @@ jobs:
           EMAIL_SUBJECT_FILE: weekly_subject.txt
           PYTHONUNBUFFERED:   '1'
         run: |
-          DAY=$(date +%u)   # 1=Mon … 6=Sat … 7=Sun (UTC, but 11:30PM Fri = 5AM Sat IST)
-          # The cron fires at 11:30 PM UTC Friday = 5 AM IST Saturday; date +%u gives 5 (Fri UTC)
-          if [ "$DAY" = "5" ] || [ "$DAY" = "6" ]; then
+          DAY=$(date +%u)   # 1=Mon … 6=Sat … 7=Sun (UTC; 3:30 PM UTC Sat = 9 PM IST Sat)
+          # The cron fires at 3:30 PM UTC; on Sat (day=6) = 9 PM IST Sat; on Sun (day=7) = 9 PM IST Sun
+          if [ "$DAY" = "6" ] || [ "$DAY" = "7" ]; then
             echo "📊 Saturday run — generating weekly digest…"
             python weekly_digest.py
             WEEK=$(date +'%d %b %Y')

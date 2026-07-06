@@ -257,7 +257,7 @@ WAITING_HTML = f"""<!DOCTYPE html>
   <div class="spinner"></div>
   <h1>📈 Indian Stock Market Toolkit</h1>
   <p>No report has been generated yet. The report runs automatically every day at
-     <strong>5:00 AM IST</strong>, or you can trigger it manually below.</p>
+     <strong>9:00 PM IST</strong>, or you can trigger it manually below.</p>
 
   <div class="card">
     <div class="label">Manual trigger</div>
@@ -936,12 +936,12 @@ def _keep_alive():
 
 if __name__ == '__main__':
     scheduler = BackgroundScheduler(timezone=IST)
-    # Every day at 5:00 AM IST
-    scheduler.add_job(run_nse_report, 'cron', hour=5, minute=0)
+    # Every day at 9:00 PM IST
+    scheduler.add_job(run_nse_report, 'cron', hour=21, minute=0)
     # Ping every 10 min to keep the process alive so the cron always fires
     scheduler.add_job(_keep_alive, 'interval', minutes=10)
     scheduler.start()
-    log.info('Scheduler started — NSE report will run every day at 5:00 AM IST.')
+    log.info('Scheduler started — NSE report will run every day at 9:00 PM IST.')
 
     if not latest_report():
         log.info('No existing report found — generating first report now...')

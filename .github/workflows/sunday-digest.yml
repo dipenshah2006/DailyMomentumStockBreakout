@@ -2,7 +2,7 @@ name: Sunday Weekly Digest
 
 on:
   schedule:
-    - cron: '30 23 * * 5,6'  # 5:00 AM IST Sat & Sun = 11:30 PM UTC Fri & Sat
+    - cron: '30 15 * * 6,0'  # 9:00 PM IST Sat & Sun = 3:30 PM UTC Sat & Sun
   workflow_dispatch:          # manual trigger from GitHub UI
     inputs:
       dry_run:
