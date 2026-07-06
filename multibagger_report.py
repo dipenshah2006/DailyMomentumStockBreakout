@@ -22,13 +22,11 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import matplotlib.patches as mpl_patches
 from matplotlib.gridspec import GridSpec
 
 warnings.filterwarnings('ignore')
@@ -49,12 +47,20 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 # ── Constants ────────────────────────────────────────────────────────────────
 REPORT_HTML    = "multibagger_report.html"
+TRADES_REPORT_HTML = "multibagger_trades_report.html"
 CHARTS_DIR     = Path("charts/multibagger")
 CACHE_FILE     = Path("charts/multibagger/scan_cache.json")
 LOOKBACK_YEARS = 'max'       # fetch full history from IPO date
-MAX_WORKERS    = 20           # parallel workers (increased for I/O-bound workloads)
+MAX_WORKERS    = 20           # parallel THREADS for I/O-bound downloads (network-bound: GIL released during I/O, so threads work well)
 BATCH_SIZE     = 50           # tickers per yfinance batch download
 MIN_DAILY_BARS = 10            # accept stocks with as few as 10 trading days (new IPOs)
+
+# Compute phase (indicators + Darvas/S-R/backtest + matplotlib chart rendering) is 100%
+# CPU-bound. Threads can't parallelize this — Python's GIL means only one thread runs
+# Python/NumPy/pandas/matplotlib bytecode at a time, so a ThreadPoolExecutor here just
+# time-slices a single core. Real speedup requires separate OS processes (each with its
+# own interpreter + GIL), so this phase uses ProcessPoolExecutor with one worker per CPU core.
+COMPUTE_WORKERS = max(1, os.cpu_count() or 4)
 
 NSE_CASH_CSV   = Path("india/NSE/NSECash/EQUITY_L.csv")
 NSE_SME_CSV    = Path("india/NSE/NSESME/MW-SME-05-May-2026.csv")
@@ -73,6 +79,27 @@ MACD_SF, MACD_SS, MACD_SSIG     = 34, 1000, 20
 BLAST_VOL_RATIO = 2.0
 BLAST_RSI_MIN   = 52
 BLAST_RSI_MAX   = 85
+
+# ── Trend-beginning-stage detection thresholds ────────────────────────────────
+NIFTY_INDEX_TICKER   = "^NSEI"   # NIFTY 50 index, used for Relative Strength
+
+STAGE_SMA_PERIOD      = 150   # daily-SMA proxy for Weinstein's 30-week MA
+STAGE_SLOPE_LOOKBACK  = 20    # ~1 month, used to judge whether SMA150 is rising/falling
+STAGE_FLAT_SLOPE_PCT  = 0.5   # SMA150 slope within +-0.5% over lookback = "flat" (basing)
+
+SQUEEZE_BB_WINDOW     = 20    # Bollinger Band window used for width calc
+SQUEEZE_PCTILE_WINDOW = 120   # trailing days used to rank how tight the current BB width is
+SQUEEZE_PCTILE_THRESH = 20    # BB width in bottom 20th percentile = "squeeze" (coiling base)
+SQUEEZE_LOOKBACK_DAYS = 10    # squeeze must have occurred within the last N days to count as "fresh"
+
+RSI_TARGET_LO         = 55    # RSI zone considered "just turning up" (trend-start momentum)
+RSI_TARGET_HI         = 65
+RSI_TARGET_HORIZON    = 20    # trading days forward used to measure historical analog moves
+RSI_TARGET_MIN_SAMPLES = 5    # need at least this many historical analogs to trust the target
+
+RS_LOOKBACKS_DAYS     = [63, 126, 189, 252]   # ~3/6/9/12 months, IBD-style weighting
+RS_WEIGHTS            = [0.4, 0.2, 0.2, 0.2]  # heavier weight on the most recent quarter
+
 
 MPLSTYLE = {
     'axes.facecolor':   '#0d1117',
@@ -100,7 +127,33 @@ def tprint(*args, **kwargs):
 
 # ── Load Stock Universe ───────────────────────────────────────────────────────
 def load_nse_stocks():
-    stocks = {}   # name → ticker
+    """Build the (name, ticker) universe.
+
+    IMPORTANT: uniqueness is enforced on the TICKER (the actual identifier used
+    to fetch price data), never on the company name. Company names are NOT
+    guaranteed unique in NSE's own data (DVR share classes, partly-paid share
+    classes, and renamed companies can carry identical or near-identical name
+    strings) — keying a dict by name risks two different real stocks silently
+    colliding, where one symbol's ticker gets discarded or a name ends up
+    pointing at the wrong company's price. Returns a list of (name, ticker)
+    tuples with every ticker guaranteed unique.
+    """
+    seen_tickers = {}   # ticker -> name, the single source of truth for uniqueness
+    seen_names   = {}    # name -> ticker, used only to detect + disambiguate name clashes
+    dup_name_ct  = 0
+
+    def _add(ticker, name):
+        nonlocal dup_name_ct
+        if ticker in seen_tickers:
+            return False   # exact duplicate ticker (e.g. duplicate CSV row) — skip silently
+        if name in seen_names:
+            dup_name_ct += 1
+            # Disambiguate rather than silently overwrite — two different
+            # tickers must never end up displayed under the same identical name.
+            name = f"{name} ({ticker.replace('.NS','').replace('.BO','')})"
+        seen_tickers[ticker] = name
+        seen_names[name] = ticker
+        return True
 
     # NSE Cash (EQUITY_L.csv) — EQ series only  [vectorised: no iterrows]
     if NSE_CASH_CSV.exists():
@@ -113,29 +166,49 @@ def load_nse_stocks():
             name_col = next((c for c in df.columns if 'NAME' in c.upper()), None)
             symbols = df['SYMBOL'].astype(str).str.strip()
             names   = df[name_col].astype(str).str.strip() if name_col else symbols
-            stocks.update({n: f"{s}.NS" for s, n in zip(symbols, names)})
-            tprint(f"  📋 NSE Cash (EQ): {len(stocks)} stocks")
+            added = 0
+            for s, n in zip(symbols, names):
+                if not s or s.lower() == 'nan':
+                    continue
+                if _add(f"{s}.NS", n):
+                    added += 1
+            if dup_name_ct:
+                tprint(f"  ⚠️  {dup_name_ct} duplicate company name(s) in NSE Cash CSV "
+                       f"— disambiguated by symbol so no ticker was dropped")
+            tprint(f"  📋 NSE Cash (EQ): {added} stocks")
         except Exception as e:
             tprint(f"  ⚠️  NSE Cash CSV error: {e}")
 
     # NSE SME (MW-SME-05-May-2026.csv)  [vectorised: no iterrows]
-    sme_start = len(stocks)
     if NSE_SME_CSV.exists():
         try:
             df = pd.read_csv(NSE_SME_CSV)
             df.columns = [c.strip() for c in df.columns]
             sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
+            added, skipped_collision = 0, 0
             if sym_col:
                 syms = df[sym_col].astype(str).str.strip().str.strip('"')
                 valid = syms[~syms.isin(['SYMBOL', 'nan', '']) & (syms.str.len() > 0)]
                 for sym in valid:
-                    stocks[f"{sym} (SME)"] = f"{sym}.NS"
-            sme_count = len(stocks) - sme_start
-            tprint(f"  📋 NSE SME: {sme_count} stocks")
+                    ticker = f"{sym}.NS"
+                    if ticker in seen_tickers:
+                        # Same exact ticker string already claimed by the mainboard
+                        # list. Yahoo Finance can only serve one real security per
+                        # ticker string, so we can't safely show both under this
+                        # symbol — keep the mainboard entry and skip the SME one
+                        # rather than silently mislabeling either.
+                        skipped_collision += 1
+                        continue
+                    if _add(ticker, f"{sym} (SME)"):
+                        added += 1
+            if skipped_collision:
+                tprint(f"  ⚠️  {skipped_collision} NSE SME symbol(s) collide with a mainboard "
+                       f"ticker — kept the mainboard listing, skipped the SME duplicate")
+            tprint(f"  📋 NSE SME: {added} stocks")
         except Exception as e:
             tprint(f"  ⚠️  NSE SME CSV error: {e}")
 
-    return stocks
+    return [(name, ticker) for ticker, name in seen_tickers.items()]  # ticker uniqueness enforced above
 
 # ── Technical Helpers ─────────────────────────────────────────────────────────
 def rsi(series, period=14):
@@ -177,6 +250,32 @@ def bollinger(close, period=20, std_dev=2):
     mid = close.rolling(period).mean()
     std = close.rolling(period).std()
     return mid - std_dev*std, mid, mid + std_dev*std
+
+def donchian(high, low, period=20):
+    """Donchian Channel: rolling high/low over `period` bars, EXCLUDING the
+    current bar (shifted by 1) so a breakout check (Close > upper) reflects a
+    genuine break of the prior range rather than today's own high padding it."""
+    upper = high.rolling(period).max().shift(1)
+    lower = low.rolling(period).min().shift(1)
+    mid   = (upper + lower) / 2
+    return upper, lower, mid
+
+def cci(high, low, close, period=20):
+    """Commodity Channel Index. MAD is computed via a vectorized sliding-window
+    view rather than pandas' per-window .apply() — with period=200 across a
+    multi-thousand-stock universe, .apply()'s per-row Python call overhead adds
+    up fast; this does the same math with no Python-level loop."""
+    tp  = (high + low + close) / 3
+    sma = tp.rolling(period).mean()
+    tp_vals = tp.to_numpy(dtype=float)
+    n = len(tp_vals)
+    mad = np.full(n, np.nan)
+    if n >= period:
+        windows = np.lib.stride_tricks.sliding_window_view(tp_vals, period)
+        wmean = windows.mean(axis=1)
+        mad[period - 1:] = np.abs(windows - wmean[:, None]).mean(axis=1)
+    mad_s = pd.Series(mad, index=tp.index)
+    return (tp - sma) / (0.015 * mad_s.replace(0, np.nan))
 
 def obv_calc(close, volume):
     return (np.sign(close.diff()).fillna(0) * volume).cumsum()
@@ -265,8 +364,14 @@ def trend_channel(df, lookback=60):
     data = df.tail(lookback).copy()
     if len(data) < 20:
         return None
-    x   = np.arange(len(data))
-    y   = data['Close'].values
+    x = np.arange(len(data))
+    y = data['Close'].values
+    if np.std(y) == 0:
+        # Flat/illiquid series (common on thinly-traded SME stocks) — polyfit on a
+        # zero-variance series is ill-conditioned and raises numpy.RankWarning.
+        # A flat trend line is also the mathematically correct fit here anyway.
+        trend = np.full_like(y, y[0], dtype=float)
+        return trend, trend, trend, data.index
     coeffs = np.polyfit(x, y, 1)
     trend  = np.polyval(coeffs, x)
     resid  = y - trend
@@ -389,6 +494,503 @@ def detect_blast(df_d, resistance_levels, lookback_days=3):
 
     return is_blast, score, ' + '.join(reason) if reason else 'Vol Surge'
 
+# ── Stage Analysis (Weinstein-style) ─────────────────────────────────────────
+def detect_stage(df_d):
+    """Classify the stock into a Weinstein-style market stage using SMA150 (daily
+    proxy for the classic 30-week MA) as the trend baseline and its slope.
+
+    Returns (stage_num, stage_label):
+      1 = Basing        (price chopping around a flat SMA150 — pre-breakout base)
+      2 = Advancing      (price above a rising SMA150 — the "trend beginning" zone)
+      3 = Topping        (price above SMA150, but the MA has stopped rising)
+      4 = Declining       (price below a falling SMA150)
+      0 = Unknown        (not enough history to judge, e.g. new IPOs)
+    """
+    n = len(df_d)
+    if n < STAGE_SMA_PERIOD + STAGE_SLOPE_LOOKBACK:
+        return 0, 'Unknown'
+
+    sma = df_d['Close'].rolling(STAGE_SMA_PERIOD, min_periods=STAGE_SMA_PERIOD).mean()
+    cur_close = float(df_d['Close'].iloc[-1])
+    cur_sma   = float(sma.iloc[-1])
+    prev_sma  = float(sma.iloc[-1 - STAGE_SLOPE_LOOKBACK])
+
+    if pd.isna(cur_sma) or pd.isna(prev_sma) or prev_sma == 0:
+        return 0, 'Unknown'
+
+    slope_pct = (cur_sma - prev_sma) / abs(prev_sma) * 100
+    above_ma  = cur_close >= cur_sma
+
+    if above_ma and slope_pct > STAGE_FLAT_SLOPE_PCT:
+        return 2, 'Advancing'
+    if above_ma and slope_pct <= STAGE_FLAT_SLOPE_PCT:
+        return 3, 'Topping'
+    if (not above_ma) and slope_pct < -STAGE_FLAT_SLOPE_PCT:
+        return 4, 'Declining'
+    return 1, 'Basing'
+
+
+# ── Volatility Squeeze (VCP / Bollinger-squeeze proxy) ───────────────────────
+def detect_squeeze(df_d):
+    """Detect volatility contraction ("coiling") followed by expansion — the
+    volume-dry-up-then-breakout pattern typical of real trend starts.
+
+    Returns dict: {in_squeeze_now, squeeze_recent, bb_width_pctile}
+      in_squeeze_now : today's BB width is in the bottom SQUEEZE_PCTILE_THRESH% of
+                       the trailing SQUEEZE_PCTILE_WINDOW days (tight base right now)
+      squeeze_recent : the tightest point in the last SQUEEZE_LOOKBACK_DAYS days was a
+                       squeeze, i.e. the stock was recently coiled and may now be
+                       expanding out of it (this is the actual breakout signal)
+      bb_width_pctile: current BB-width percentile rank (0-100, lower = tighter)
+    """
+    n = len(df_d)
+    if n < SQUEEZE_PCTILE_WINDOW + SQUEEZE_BB_WINDOW:
+        return {'in_squeeze_now': False, 'squeeze_recent': False, 'bb_width_pctile': np.nan}
+
+    mid = df_d['Close'].rolling(SQUEEZE_BB_WINDOW).mean()
+    std = df_d['Close'].rolling(SQUEEZE_BB_WINDOW).std()
+    bb_width = (4 * std / mid.replace(0, np.nan))  # (upper-lower)/mid, 2*std each side
+
+    pctile = bb_width.rolling(SQUEEZE_PCTILE_WINDOW).rank(pct=True) * 100
+    cur_pctile = float(pctile.iloc[-1]) if not pd.isna(pctile.iloc[-1]) else np.nan
+
+    recent_pctile = pctile.tail(SQUEEZE_LOOKBACK_DAYS)
+    squeeze_recent = bool((recent_pctile <= SQUEEZE_PCTILE_THRESH).any())
+    in_squeeze_now = bool(cur_pctile <= SQUEEZE_PCTILE_THRESH) if not pd.isna(cur_pctile) else False
+
+    return {'in_squeeze_now': in_squeeze_now, 'squeeze_recent': squeeze_recent,
+            'bb_width_pctile': cur_pctile}
+
+
+# ── RSI Momentum Analog Target ───────────────────────────────────────────────
+def rsi_momentum_target(df_d):
+    """Data-driven target: find every past occurrence where this stock's RSI was
+    just turning up through the RSI_TARGET_LO-RSI_TARGET_HI zone (the same setup
+    as "now"), and measure what the stock actually did over the following
+    RSI_TARGET_HORIZON trading days. The median of those historical moves,
+    applied to the current price, gives a target grounded in the stock's own
+    behavior rather than a fixed multiplier.
+
+    Returns dict: {target, median_gain_pct, sample_count} — target is None if
+    there isn't enough history of similar setups to trust the estimate.
+    """
+    rsi_s = df_d['RSI']
+    close = df_d['Close']
+    n = len(df_d)
+    if n < RSI_TARGET_HORIZON + 30:
+        return {'target': None, 'median_gain_pct': None, 'sample_count': 0}
+
+    # Forward-looking max close over the next RSI_TARGET_HORIZON days (excludes today)
+    fwd_max = close.shift(-1)[::-1].rolling(RSI_TARGET_HORIZON, min_periods=1).max()[::-1]
+
+    setup_mask = (rsi_s >= RSI_TARGET_LO) & (rsi_s < RSI_TARGET_HI) & (rsi_s > rsi_s.shift(1))
+    # Exclude the most recent RSI_TARGET_HORIZON bars — they don't have forward data yet
+    setup_mask.iloc[-RSI_TARGET_HORIZON:] = False
+    valid = setup_mask & fwd_max.notna() & (close > 0)
+
+    if valid.sum() < RSI_TARGET_MIN_SAMPLES:
+        return {'target': None, 'median_gain_pct': None, 'sample_count': int(valid.sum())}
+
+    gains_pct = (fwd_max[valid] - close[valid]) / close[valid] * 100
+    median_gain = float(gains_pct.median())
+    cur_price = float(close.iloc[-1])
+    target = cur_price * (1 + median_gain / 100)
+
+    return {'target': round(target, 2), 'median_gain_pct': round(median_gain, 1),
+            'sample_count': int(valid.sum())}
+
+
+# ── Relative Strength vs Index (IBD-style RS raw score) ──────────────────────
+def relative_strength_raw(df_d):
+    """Weighted blended return over ~3/6/9/12 months (IBD-style, heavier weight on
+    the most recent quarter). This is a raw score for one stock; call this on the
+    index too, and rank all stocks' scores as a percentile to get an RS Rating.
+    Returns None if there isn't enough history.
+    """
+    n = len(df_d)
+    if n <= max(RS_LOOKBACKS_DAYS):
+        return None
+    close = df_d['Close']
+    cur = float(close.iloc[-1])
+    score = 0.0
+    for days, w in zip(RS_LOOKBACKS_DAYS, RS_WEIGHTS):
+        past = float(close.iloc[-1 - days])
+        if past <= 0:
+            return None
+        ret = (cur / past) - 1
+        score += w * ret
+    return score
+
+
+# ── Generic Crossover State (RSI200/SMA34, CCI200/SMA34, etc.) ───────────────
+def crossover_state(fast, slow, fresh_lookback=5):
+    """Given two aligned series (e.g. RSI200 vs its SMA34), returns:
+      state       : 'Bullish' (fast > slow), 'Bearish' (fast < slow), 'Unknown'
+      fresh_cross : 'Bull Cross' / 'Bear Cross' / None — True only if the cross
+                    happened within the last `fresh_lookback` bars (i.e. it's a
+                    genuinely recent, actionable signal rather than a crossover
+                    from months ago that just happens to still be in that state)
+    """
+    if len(fast) < 2 or pd.isna(fast.iloc[-1]) or pd.isna(slow.iloc[-1]):
+        return 'Unknown', None
+
+    state = 'Bullish' if fast.iloc[-1] > slow.iloc[-1] else 'Bearish'
+
+    diff = (fast - slow)
+    recent = diff.tail(fresh_lookback + 1).dropna()
+    fresh_cross = None
+    if len(recent) >= 2:
+        sign = np.sign(recent.values)
+        # any adjacent-sign flip within the recent window counts as a fresh cross
+        flips = np.where(np.diff(sign) != 0)[0]
+        if len(flips) > 0:
+            fresh_cross = 'Bull Cross' if sign[-1] > 0 else 'Bear Cross'
+
+    return state, fresh_cross
+
+
+def macd_trend_state(df, hist_lookback=3):
+    """Friendly MACD(12,26,9) trend read for a timeframe (weekly/monthly), for
+    checking — the way a discretionary trader would — whether the higher
+    timeframes agree with a daily BUY signal. Returns one of:
+      'Uptrend'      : MACD above signal, and not losing momentum
+      'Weakening'    : MACD above signal, but the histogram is fading
+                       (a bullish state that's starting to roll over)
+      'Reversing Up' : MACD below signal, but the histogram is improving
+                       (a downtrend that's starting to turn)
+      'Downtrend'    : MACD below signal, and not improving
+      'Unknown'      : not enough history
+    """
+    macd, sig, hist = df['MACD'], df['MACD_sig'], df['MACD_hist']
+    if len(macd) < hist_lookback + 1 or pd.isna(macd.iloc[-1]) or pd.isna(sig.iloc[-1]):
+        return 'Unknown'
+
+    bullish = macd.iloc[-1] > sig.iloc[-1]
+    recent_hist = hist.tail(hist_lookback + 1).dropna()
+    improving = len(recent_hist) >= 2 and recent_hist.iloc[-1] > recent_hist.iloc[0]
+
+    if bullish:
+        return 'Uptrend' if improving else 'Weakening'
+    else:
+        return 'Reversing Up' if improving else 'Downtrend'
+
+
+# ── Multi-timeframe RSI direction signal ─────────────────────────────────────
+def mtf_rsi_signal(df_w, df_m):
+    """Weekly + monthly RSI(14) direction combined into one signal:
+      both rising  -> 'BUY'   (momentum building across timeframes)
+      both falling -> 'SELL'  (momentum fading across timeframes)
+      mixed        -> 'NEUTRAL'
+    Returns (signal, w_rising, m_rising) — the individual directions are
+    returned too so they can be shown separately (e.g. on the RSI chart panel).
+    """
+    def _rising(rsi_series):
+        s = rsi_series.dropna()
+        if len(s) < 2:
+            return None
+        return bool(s.iloc[-1] > s.iloc[-2])
+
+    w_rising = _rising(df_w['RSI'])
+    m_rising = _rising(df_m['RSI'])
+
+    if w_rising is None or m_rising is None:
+        return 'NEUTRAL', w_rising, m_rising
+    if w_rising and m_rising:
+        return 'BUY', w_rising, m_rising
+    if (not w_rising) and (not m_rising):
+        return 'SELL', w_rising, m_rising
+    return 'NEUTRAL', w_rising, m_rising
+
+
+# ── Chart Pattern Recognition ─────────────────────────────────────────────────
+PATTERN_LOOKBACK      = 180   # bars considered for pattern detection (daily)
+PATTERN_MIN_PIVOT_PCT = 6.0   # minimum % swing to count as a structural turn — kept fairly
+                               # high because a low threshold produces many small pivots,
+                               # and more pivots means far more combinatorial opportunities
+                               # for a pure random walk to coincidentally satisfy a shape check
+PATTERN_TOL_PCT       = 3.0   # tolerance for "roughly equal" peaks/troughs/shoulders —
+                               # kept at a realistic level (real double tops/H&S shoulders
+                               # commonly differ by 2-3% and are still textbook-valid);
+                               # noise is filtered mainly via MIN_SEPARATION and DEPTH_MULT
+                               # below rather than by squeezing this so tight it rejects
+                               # genuinely valid patterns
+PATTERN_MIN_DEPTH_MULT = 1.5  # pattern depth (neckline distance) must be this many times
+                               # the min swing threshold — barely-there depth is a much
+                               # weaker signal than min_pct alone would allow through
+PATTERN_MIN_SEPARATION = 12   # minimum bars between a pattern's key points — real chart
+                               # patterns take time to form; without this, a persistently
+                               # trending random walk can produce several tightly-clustered
+                               # pivots that coincidentally satisfy a similarity tolerance
+PATTERN_TRIANGLE_SLOPE_PCT = 2.0  # min rise/fall needed between the first and last
+                                   # confirmed pivot to call a triangle boundary "rising"
+                                   # or "falling" — deliberately smaller than
+                                   # PATTERN_MIN_PIVOT_PCT: each pivot compared here has
+                                   # already cleared that bar individually, so requiring
+                                   # the same large threshold again between them would be
+                                   # redundant and reject genuine, gently-sloped triangles
+
+PATTERN_PRIORITY = ['Head & Shoulders', 'Inverse H&S', 'Double Top', 'Double Bottom',
+                    'Cup & Handle', 'Ascending Triangle', 'Descending Triangle',
+                    'Symmetrical Triangle']
+
+def _zigzag_pivots(df, min_pct=PATTERN_MIN_PIVOT_PCT):
+    """Classic percentage ZigZag: alternating swing highs (from High) and swing
+    lows (from Low), where each swing must move at least min_pct% from the
+    prior extreme to register — this merges out day-to-day noise and keeps
+    only structurally significant turns. Returns a chronological list of
+    (bar_position, price, 'H'|'L'); the final entry is the still-forming swing.
+    """
+    h, l = df['High'].to_numpy(dtype=float), df['Low'].to_numpy(dtype=float)
+    n = len(h)
+    if n < 10:
+        return []
+
+    # Seed: find the first bar where price has moved min_pct% away from bar 0
+    # in either direction — this establishes the initial swing direction.
+    trend, seed_i = None, None
+    for i in range(1, n):
+        up   = (h[i] - l[0]) / l[0] * 100 if l[0] else 0
+        down = (h[0] - l[i]) / h[0] * 100 if h[0] else 0
+        if up >= min_pct:
+            trend, seed_i = 1, i
+            break
+        if down >= min_pct:
+            trend, seed_i = -1, i
+            break
+    if trend is None:
+        return []
+
+    pivots = []
+    if trend == 1:
+        pivots.append((0, l[0], 'L'))
+        ext_idx, ext_price = seed_i, h[seed_i]
+    else:
+        pivots.append((0, h[0], 'H'))
+        ext_idx, ext_price = seed_i, l[seed_i]
+
+    for i in range(seed_i + 1, n):
+        if trend == 1:
+            if h[i] > ext_price:
+                ext_price, ext_idx = h[i], i
+                continue
+            pullback = (ext_price - l[i]) / ext_price * 100
+            if pullback >= min_pct:
+                pivots.append((ext_idx, ext_price, 'H'))
+                trend, ext_idx, ext_price = -1, i, l[i]
+        else:
+            if l[i] < ext_price:
+                ext_price, ext_idx = l[i], i
+                continue
+            rally = (h[i] - ext_price) / ext_price * 100
+            if rally >= min_pct:
+                pivots.append((ext_idx, ext_price, 'L'))
+                trend, ext_idx, ext_price = 1, i, h[i]
+
+    pivots.append((ext_idx, ext_price, 'H' if trend == 1 else 'L'))
+    return pivots
+
+
+def _pct_similar(a, b, tol=PATTERN_TOL_PCT):
+    return abs(a - b) / max(abs(a), abs(b), 1e-9) * 100 <= tol
+
+
+def _detect_cup_and_handle(window, cur_close, min_depth_pct=12.0, max_handle_retrace=0.5):
+    """Cup & Handle: a rounded U-shaped recovery (left rim ~ right rim height,
+    with meaningful depth between them) followed by a shallow 'handle' pullback
+    near the highs. This looks at the actual price path (not just pivots),
+    since the rounded shape is a geometric property the sparse ZigZag pivots
+    alone wouldn't reliably capture.
+    """
+    c = window['Close']
+    n = len(c)
+    if n < 40:
+        return None
+    c_vals = c.to_numpy(dtype=float)
+
+    # Reserve the tail of the series for the handle so the cup's "right rim"
+    # search can't wander into the handle/breakout and mistake a later breakout
+    # high for the actual rim.
+    handle_reserve = max(5, min(20, n // 5))
+    cup_end = n - handle_reserve
+    if cup_end < 20:
+        return None
+
+    cup_region = c_vals[:cup_end]
+    bottom_pos = int(cup_region.argmin())
+    if bottom_pos < 8 or bottom_pos > len(cup_region) - 8:
+        return None  # need room on both sides for the rims
+
+    left_rim      = float(cup_region[:bottom_pos + 1].max())
+    left_rim_pos  = int(cup_region[:bottom_pos + 1].argmax())
+    right_slice   = cup_region[bottom_pos:]
+    right_rim     = float(right_slice.max())
+    right_rim_pos = bottom_pos + int(right_slice.argmax())
+    bottom_price  = float(cup_region[bottom_pos])
+
+    rim_similar = abs(left_rim - right_rim) / max(left_rim, right_rim) * 100 <= 6.0
+    depth_pct   = (min(left_rim, right_rim) - bottom_price) / min(left_rim, right_rim) * 100
+    duration_ok = (right_rim_pos - left_rim_pos) >= 15
+
+    if not (rim_similar and depth_pct >= min_depth_pct and duration_ok):
+        return None
+
+    handle = c_vals[right_rim_pos:]
+    if len(handle) < 3:
+        return None
+    handle_low       = float(handle.min())
+    handle_depth_pct = (right_rim - handle_low) / right_rim * 100
+    cup_depth_pct    = (right_rim - bottom_price) / right_rim * 100
+    if handle_depth_pct > cup_depth_pct * max_handle_retrace:
+        return None  # handle pulled back too far to still count as a handle
+
+    status = 'confirmed' if cur_close > right_rim else 'forming'
+    return {'name': 'Cup & Handle', 'direction': 'bullish', 'status': status, 'key_level': round(right_rim, 2)}
+
+
+def detect_chart_patterns(df, lookback=PATTERN_LOOKBACK, min_pct=PATTERN_MIN_PIVOT_PCT, tol_pct=PATTERN_TOL_PCT):
+    """Detects classic price-action chart patterns from a ZigZag pivot sequence
+    (Double Top/Bottom, Head & Shoulders, Triangles) plus a dedicated Cup &
+    Handle shape check. Returns a list of pattern dicts, each:
+      {'name', 'direction' ('bullish'/'bearish'/'neutral'),
+       'status' ('confirmed' if price already broke the key level, else
+                 'forming'), 'key_level'}
+    An empty list means no pattern currently qualifies — patterns are
+    intentionally strict (tolerance-gated) to avoid false positives.
+    """
+    n = len(df)
+    if n < 30:
+        return []
+
+    window = df.tail(min(lookback, n))
+    piv = _zigzag_pivots(window, min_pct=min_pct)
+    cur_close = float(df['Close'].iloc[-1])
+    patterns = []
+
+    def similar(a, b):
+        return _pct_similar(a, b, tol_pct)
+
+    # Scan a small recent window of pivots (not just the literal tail) for the
+    # MOST RECENT match of a given type-sequence — this matters because once a
+    # pattern's breakout keeps moving, price registers a further new swing, and
+    # the pattern would otherwise "fall off the end" of a naive tail check even
+    # though the breakout clearly already happened.
+    def most_recent_match(want_types, checker):
+        recent = piv[-9:]
+        found = None
+        span = len(want_types)
+        for i in range(len(recent) - span + 1):
+            group = recent[i:i + span]
+            if [p[2] for p in group] == want_types:
+                res = checker(*group)
+                if res:
+                    found = res   # keep overwriting -> last (most recent) match wins
+        return found
+
+    # -- Double Top / Double Bottom (H,L,H or L,H,L) -------------------------
+    def _double_top(p1, p2, p3):
+        if p3[0] - p1[0] < PATTERN_MIN_SEPARATION:
+            return None   # pattern formed too fast to be a real structural double top
+        if similar(p1[1], p3[1]):
+            neckline = p2[1]
+            if (min(p1[1], p3[1]) - neckline) / neckline * 100 >= min_pct * PATTERN_MIN_DEPTH_MULT:
+                status = 'confirmed' if cur_close < neckline else 'forming'
+                return {'name': 'Double Top', 'direction': 'bearish',
+                        'status': status, 'key_level': round(neckline, 2)}
+        return None
+
+    def _double_bottom(p1, p2, p3):
+        if p3[0] - p1[0] < PATTERN_MIN_SEPARATION:
+            return None
+        if similar(p1[1], p3[1]):
+            neckline = p2[1]
+            if (neckline - max(p1[1], p3[1])) / neckline * 100 >= min_pct * PATTERN_MIN_DEPTH_MULT:
+                status = 'confirmed' if cur_close > neckline else 'forming'
+                return {'name': 'Double Bottom', 'direction': 'bullish',
+                        'status': status, 'key_level': round(neckline, 2)}
+        return None
+
+    if len(piv) >= 3:
+        m = most_recent_match(['H', 'L', 'H'], _double_top)
+        if m: patterns.append(m)
+        m = most_recent_match(['L', 'H', 'L'], _double_bottom)
+        if m: patterns.append(m)
+
+    # -- Head & Shoulders / Inverse H&S (H,L,H,L,H or L,H,L,H,L) -------------
+    def _hns(p1, p2, p3, p4, p5):
+        if p5[0] - p1[0] < PATTERN_MIN_SEPARATION * 2:
+            return None   # three peaks crammed into too few bars isn't a real H&S
+        head_prominence = (p3[1] - max(p1[1], p5[1])) / max(p1[1], p5[1]) * 100
+        if head_prominence >= PATTERN_TRIANGLE_SLOPE_PCT and similar(p1[1], p5[1]) and similar(p2[1], p4[1]):
+            neckline = (p2[1] + p4[1]) / 2
+            status = 'confirmed' if cur_close < neckline else 'forming'
+            return {'name': 'Head & Shoulders', 'direction': 'bearish',
+                    'status': status, 'key_level': round(neckline, 2)}
+        return None
+
+    def _inv_hns(p1, p2, p3, p4, p5):
+        if p5[0] - p1[0] < PATTERN_MIN_SEPARATION * 2:
+            return None
+        head_prominence = (min(p1[1], p5[1]) - p3[1]) / min(p1[1], p5[1]) * 100
+        if head_prominence >= PATTERN_TRIANGLE_SLOPE_PCT and similar(p1[1], p5[1]) and similar(p2[1], p4[1]):
+            neckline = (p2[1] + p4[1]) / 2
+            status = 'confirmed' if cur_close > neckline else 'forming'
+            return {'name': 'Inverse H&S', 'direction': 'bullish',
+                    'status': status, 'key_level': round(neckline, 2)}
+        return None
+
+    if len(piv) >= 5:
+        m = most_recent_match(['H', 'L', 'H', 'L', 'H'], _hns)
+        if m: patterns.append(m)
+        m = most_recent_match(['L', 'H', 'L', 'H', 'L'], _inv_hns)
+        if m: patterns.append(m)
+
+    # -- Triangles (flat/rising/falling highs vs lows over confirmed pivots) --
+    # Exclude the final pivot: it's the still-forming/live swing (could already
+    # be a breakout move), so using it to judge the *shape* would corrupt the
+    # flat/rising/falling read. The shape comes from confirmed structure only;
+    # cur_close (live) is used separately to judge confirmed-vs-forming status.
+    confirmed_piv = piv[:-1] if len(piv) > 1 else piv
+    recent = confirmed_piv[-6:]
+    highs = [p[1] for p in recent if p[2] == 'H']
+    lows  = [p[1] for p in recent if p[2] == 'L']
+    if len(highs) >= 2 and len(lows) >= 2:
+        h_flat    = similar(highs[0], highs[-1])
+        l_flat    = similar(lows[0], lows[-1])
+        h_falling = highs[-1] < highs[0] * (1 - PATTERN_TRIANGLE_SLOPE_PCT / 100)
+        l_rising  = lows[-1]  > lows[0]  * (1 + PATTERN_TRIANGLE_SLOPE_PCT / 100)
+        resistance, support = max(highs), min(lows)
+        if h_flat and l_rising:
+            status = 'confirmed' if cur_close > resistance else 'forming'
+            patterns.append({'name': 'Ascending Triangle', 'direction': 'bullish',
+                              'status': status, 'key_level': round(resistance, 2)})
+        elif l_flat and h_falling:
+            status = 'confirmed' if cur_close < support else 'forming'
+            patterns.append({'name': 'Descending Triangle', 'direction': 'bearish',
+                              'status': status, 'key_level': round(support, 2)})
+        elif h_falling and l_rising:
+            patterns.append({'name': 'Symmetrical Triangle', 'direction': 'neutral',
+                              'status': 'forming', 'key_level': None})
+
+    # -- Cup & Handle ---------------------------------------------------------
+    cup = _detect_cup_and_handle(window, cur_close)
+    if cup:
+        patterns.append(cup)
+
+    return patterns
+
+
+def pick_primary_pattern(patterns):
+    """Choose the single most noteworthy pattern to headline (for the icon +
+    filter): confirmed patterns outrank forming ones, then fall back to a
+    fixed priority order (more specific/reliable patterns first)."""
+    if not patterns:
+        return None
+    confirmed = [p for p in patterns if p['status'] == 'confirmed']
+    pool = confirmed if confirmed else patterns
+    pool = sorted(pool, key=lambda p: PATTERN_PRIORITY.index(p['name'])
+                  if p['name'] in PATTERN_PRIORITY else len(PATTERN_PRIORITY))
+    return pool[0]
+
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 def fetch_data(ticker):
     """Single-ticker full-history download. Returns OHLCV DataFrame or None."""
@@ -404,7 +1006,27 @@ def fetch_data(ticker):
         df.index = pd.to_datetime(df.index)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df = df[['Open','High','Low','Close','Volume']].copy()
+
+        # Guard against duplicate column names — yfinance occasionally returns
+        # these for certain tickers. A duplicate name makes df['Close'] return
+        # a DataFrame instead of a Series, which then silently corrupts every
+        # downstream indicator calculation until a later assignment finally
+        # raises "Cannot set a DataFrame with multiple columns to the single
+        # column EMA9" (or whichever indicator happens to hit it first) — a
+        # confusing error far from the actual cause. Dedupe right here instead.
+        if df.columns.duplicated().any():
+            df = df.loc[:, ~df.columns.duplicated(keep='first')]
+
+        required = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(c in df.columns for c in required):
+            return None
+        df = df[required].copy()
+
+        # Belt-and-suspenders: confirm every required column really is 1-D
+        # (a Series) before handing this off to the indicator pipeline.
+        if any(isinstance(df[c], pd.DataFrame) for c in required):
+            return None
+
         df.dropna(inplace=True)
         return df
     except Exception:
@@ -470,6 +1092,32 @@ def add_indicators(df):
     df['STOCH_K'], df['STOCH_D'] = stochastic(h, l, c)
     bb_p = min(20, max(2, n // 2))
     df['BB_lo'], df['BB_mid'], df['BB_hi'] = bollinger(c, bb_p, 2)
+    df['BB_UP_BREAK'] = c > df['BB_hi']
+
+    don_p = min(20, max(2, n // 2))
+    df['DON_HI'], df['DON_LO'], df['DON_MID'] = donchian(h, l, don_p)
+    df['DON_BREAK'] = c > df['DON_HI']
+
+    # RSI(14) trend filter: SMA(14) of RSI itself, bullish regime when above 50
+    df['RSI_SMA14'] = df['RSI'].rolling(min(14, max(2, n // 3))).mean()
+    df['RSI_SMA14_BULL'] = df['RSI_SMA14'] > 50
+
+    # RSI(200)/SMA(34) crossover — a long-period RSI is very smooth, so a cross
+    # of its own moving average is a slow, high-conviction trend-shift signal.
+    if n >= 200:
+        df['RSI200'] = rsi(c, 200)
+        df['RSI200_SMA34'] = df['RSI200'].rolling(34).mean()
+    else:
+        df['RSI200'] = np.nan
+        df['RSI200_SMA34'] = np.nan
+
+    # CCI(200)/SMA(34) crossover — same idea applied to CCI.
+    if n >= 200:
+        df['CCI200'] = cci(h, l, c, 200)
+        df['CCI200_SMA34'] = df['CCI200'].rolling(34).mean()
+    else:
+        df['CCI200'] = np.nan
+        df['CCI200_SMA34'] = np.nan
 
     df['OBV']      = obv_calc(c, v)
     vm = min(20, max(2, n // 2))
@@ -532,6 +1180,19 @@ def add_indicators_lite(df):
         df[f'EMA{p}'] = c.ewm(span=p, adjust=False, min_periods=min(p, max(1, n))).mean()
 
     df['RSI'] = rsi(c, min(14, max(2, n // 2)))
+    df['RSI_SMA14'] = df['RSI'].rolling(min(14, max(2, n // 3)), min_periods=1).mean()
+
+    cci_p = min(20, max(2, n // 2))
+    df['CCI20'] = cci(h, l, c, cci_p)
+    df['CCI20_SMA20'] = df['CCI20'].rolling(cci_p, min_periods=1).mean()
+
+    bb_p = min(20, max(2, n // 2))
+    df['BB_lo'], df['BB_mid'], df['BB_hi'] = bollinger(c, bb_p, 2)
+    df['BB_UP_BREAK'] = c > df['BB_hi']
+
+    don_p = min(20, max(2, n // 2))
+    df['DON_HI'], df['DON_LO'], df['DON_MID'] = donchian(h, l, don_p)
+    df['DON_BREAK'] = c > df['DON_HI']
 
     df['MACD'], df['MACD_sig'], df['MACD_hist'] = macd_calc(c, MACD_FAST, MACD_SLOW, MACD_SIG)
     df['MACD_US'], df['MACD_US_sig'], df['MACD_US_hist'] = macd_calc(c, MACD_SF, MACD_SS, MACD_SSIG)
@@ -605,10 +1266,24 @@ def backtest(df_d, signals):
     return trades
 
 # ── Fibonacci Extensions ──────────────────────────────────────────────────────
-def fibonacci_targets(df_d, lookback=252):
-    recent = df_d.tail(lookback)
-    sl = float(recent['Low'].min()); sh = float(recent['High'].max())
-    cur = float(df_d['Close'].iloc[-1]); rng = sh - sl
+def fibonacci_targets(df_d, lookback=252, base_box=None):
+    """Fibonacci extension targets.
+
+    If base_box (the most recent Darvas box) is supplied, the swing low/high is
+    anchored to that actual consolidation range — i.e. the base the stock is
+    breaking out of — which gives a much more meaningful measured-move target
+    than a generic rolling high/low. Falls back to the rolling-window method
+    (e.g. for stocks with no detected box yet) if base_box is None.
+    """
+    cur = float(df_d['Close'].iloc[-1])
+    if base_box is not None:
+        sl = float(base_box['bottom'])
+        sh = float(base_box['top'])
+    else:
+        recent = df_d.tail(lookback)
+        sl = float(recent['Low'].min())
+        sh = float(recent['High'].max())
+    rng = sh - sl
     return {
         'swing_low':  round(sl, 2),  'swing_high': round(sh, 2),
         'current':    round(cur, 2),
@@ -616,6 +1291,7 @@ def fibonacci_targets(df_d, lookback=252):
         'fib_1618':   round(cur + 1.618*rng, 2),
         'fib_2618':   round(cur + 2.618*rng, 2),
         'fib_4236':   round(cur + 4.236*rng, 2),
+        'base_anchored': base_box is not None,
     }
 
 # ── Score ─────────────────────────────────────────────────────────────────────
@@ -657,9 +1333,120 @@ def compute_score(df_d, df_w, df_m, signals, is_blast):
 
     return min(score, 100)
 
+
+# ── Early Trend Score ─────────────────────────────────────────────────────────
+def compute_early_trend_score(stage_num, squeeze_recent, vol_ratio, d_rsi_val, adx_val,
+                               rs_rating=None):
+    """Combines everything that distinguishes a genuine trend-beginning setup from
+    a stock that's simply moving (which BLAST alone can't tell apart):
+      - Stage 2 (Advancing) is the target zone; Stage 1 (Basing) gets partial
+        credit since it's the setup that precedes Stage 2.
+      - A recent volatility squeeze = the coiling/base-tightening pattern that
+        typically precedes real breakouts (as opposed to a random volume spike).
+      - Volume expansion confirms the breakout is being bought, not just noise.
+      - RSI in a healthy momentum zone (55-75) beats RSI already at 85+, which
+        usually means the move is late, not early.
+      - ADX 18-40 = a trend that's just getting going; ADX 40+ is often already
+        mature/extended.
+      - RS Rating (percentile vs the rest of today's scanned universe, IBD-style)
+        rewards stocks already outperforming — a weak stock breaking out on its
+        own base is a much lower-quality signal than a market leader doing it.
+    Returns an int score 0-100.
+    """
+    score = 0
+    if stage_num == 2:   score += 30
+    elif stage_num == 1: score += 10
+
+    if squeeze_recent: score += 20
+
+    if vol_ratio >= BLAST_VOL_RATIO: score += 15
+    elif vol_ratio >= VOL_SURGE:     score += 8
+
+    if 55 <= d_rsi_val <= 75: score += 15
+    elif d_rsi_val > 75:      score += 5
+
+    if 18 <= adx_val <= 40: score += 10
+    elif adx_val > 40:      score += 3
+
+    if rs_rating is not None:
+        if rs_rating >= 80:   score += 25
+        elif rs_rating >= 70: score += 15
+        elif rs_rating >= 50: score += 5
+
+    return min(100, score)
+
+
+# ── Trend Exit Score ──────────────────────────────────────────────────────────
+def compute_trend_exit_score(stage_num, mtf_signal, dv_w_status, dv_m_status,
+                              rsi200_state, rsi200_cross, d_rsi_val,
+                              macd_us_state=None, macd_us_cross=None,
+                              w_macd_state=None, m_macd_state=None,
+                              m_rsi_sma_state=None, m_rsi_sma_cross=None,
+                              m_cci_state=None, m_cci_cross=None):
+    """The exit-side counterpart to the Early Trend Score, for POSITION trades
+    (weeks-to-months holds riding a Stage 2 trend) rather than short swing
+    trades. generate_signals()'s daily 'SELL' (RSI<50 crossing under SMA20, or
+    RSI<45) is a *tactical* trigger — it fires on ordinary pullbacks that
+    happen routinely inside a real uptrend, and would repeatedly whipsaw a
+    position trader out of a multi-month/multi-year trend. This score instead
+    only weighs bigger-picture, structural deterioration:
+      - Stage flipping from 2 (Advancing) to 3 (Topping) or 4 (Declining) —
+        the single biggest signal that the trend itself, not just the daily
+        candle, has turned.
+      - MTF RSI signal at 'SELL' (both weekly AND monthly RSI falling) — the
+        same multi-timeframe logic used to confirm entries, applied in reverse.
+      - Weekly or Monthly Darvas box status at 'BREAKDOWN' — a structural
+        break on the timeframes you're supposed to be riding the trend on.
+      - RSI(200)/SMA(34) turning Bearish (or a fresh Bear Cross) — a slow,
+        high-conviction trend-shift confirmation.
+      - MACD(34,1000,20) on the daily chart turning bearish — this ultra-slow
+        MACD is a well-known discretionary sell signal; a fresh bear cross
+        here carries real weight.
+      - Weekly or Monthly MACD(12,26,9) in a 'Downtrend' state — mirrors the
+        manual check of "did I confirm weekly/monthly MACD before trusting
+        this buy" applied on the way out too.
+      - Monthly RSI(14)/SMA(14) or CCI(20)/SMA(20) turning bearish — slow,
+        monthly-timeframe confirmation that momentum has broken down.
+      - Daily RSI < 45 adds a small amount of weight only as a minor, current
+        confirming factor — not as the primary trigger.
+    Returns an int score 0-100; treat >=40 as "worth reviewing the position,"
+    not as an automatic sell instruction.
+    """
+    score = 0
+    if stage_num == 4:   score += 45
+    elif stage_num == 3: score += 30
+
+    if mtf_signal == 'SELL': score += 25
+
+    if dv_w_status == 'BREAKDOWN': score += 20
+    if dv_m_status == 'BREAKDOWN': score += 15
+
+    if rsi200_cross == 'Bear Cross': score += 20
+    elif rsi200_state == 'Bearish':  score += 10
+
+    if macd_us_cross == 'Bear Cross': score += 20
+    elif macd_us_state == 'Bearish':  score += 10
+
+    if w_macd_state == 'Downtrend': score += 12
+    if m_macd_state == 'Downtrend': score += 15
+
+    if m_rsi_sma_cross == 'Bear Cross': score += 12
+    elif m_rsi_sma_state == 'Bearish':  score += 6
+
+    if m_cci_cross == 'Bear Cross': score += 10
+    elif m_cci_state == 'Bearish':  score += 5
+
+    if d_rsi_val < 45: score += 10
+
+    return min(100, score)
+
 # ── Chart: Daily (5-panel) with Darvas + Blast + S/R ─────────────────────────
 def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_score,
-                resistance, support, out_path):
+                resistance, support, out_path, stage_label=None,
+                mtf_signal=None, w_rsi_rising=None, m_rsi_rising=None,
+                primary_pattern=None,
+                w_macd_state=None, m_macd_state=None, mtf_macd_confirmed=None,
+                trend_exit=None, trend_exit_score=None):
     with plt.rc_context(MPLSTYLE):
         fig = plt.figure(figsize=(16, 18), facecolor='#0d1117')
         gs  = GridSpec(5, 1, figure=fig, hspace=0.05,
@@ -705,7 +1492,6 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                 be = pd.Timestamp(box['box_end'])
                 if bs >= x[0]:
                     color = '#00ff88' if box['breakout'] else ('#ff4444' if box['breakdown'] else '#fbbf24')
-                    rect = mpl_patches.FancyArrowPatch
                     ax_p.axhspan(box['bottom'], box['top'],
                                  xmin=max(0, (bs - x[0]).days / (x[-1] - x[0]).days),
                                  xmax=min(1, (be - x[0]).days / (x[-1] - x[0]).days),
@@ -745,13 +1531,31 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                       textcoords='offset points', fontsize=6, color='#00ff88')
 
         blast_txt = f' 🚀 BLAST ({blast_score})' if is_blast else ''
-        ax_p.set_title(f'{name} [{ticker}] — Daily Chart{blast_txt}',
-                       fontsize=12, color='#00ff88' if is_blast else '#e6edf3',
+        stage_txt = f'  |  Stage: {stage_label}' if stage_label else ''
+        pattern_txt = ''
+        if primary_pattern:
+            tag = 'CONFIRMED' if primary_pattern['status'] == 'confirmed' else 'forming'
+            pattern_txt = f"  |  Pattern: {primary_pattern['name']} ({tag})"
+        exit_title_txt = f'  |  🔔 TREND EXIT ({trend_exit_score})' if trend_exit else ''
+        title_color = '#ff6b6b' if trend_exit else ('#00ff88' if is_blast else '#e6edf3')
+        ax_p.set_title(f'{name} [{ticker}] — Daily Chart{blast_txt}{stage_txt}{pattern_txt}{exit_title_txt}',
+                       fontsize=12, color=title_color,
                        fontweight='bold', pad=6)
         ax_p.legend(fontsize=6.5, loc='upper left', ncol=5,
                     facecolor='#161b22', edgecolor='#30363d', labelcolor='#e6edf3')
         ax_p.grid(True, alpha=0.25)
         ax_p.yaxis.tick_right()
+
+        # Draw the pattern's key level (neckline / triangle boundary / cup rim)
+        # so the trigger price is visible directly on the chart.
+        if primary_pattern and primary_pattern.get('key_level') is not None:
+            lvl = primary_pattern['key_level']
+            pcolor = '#00ff88' if primary_pattern['direction'] == 'bullish' else \
+                     ('#ff6b6b' if primary_pattern['direction'] == 'bearish' else '#f0b429')
+            ax_p.axhline(lvl, color=pcolor, lw=0.8, ls=':', alpha=0.8)
+            ax_p.annotate(f"{primary_pattern['name']} {lvl:,.1f}",
+                          xy=(x[-1], lvl), xytext=(-100, -10 if primary_pattern['direction']=='bearish' else 6),
+                          textcoords='offset points', fontsize=6, color=pcolor)
 
         # ── Volume ────────────────────────────────────────────────────────────
         vc = np.where(df['VOL_RATIO'] > BLAST_VOL_RATIO, '#fbbf24',
@@ -766,6 +1570,8 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
 
         # ── RSI ───────────────────────────────────────────────────────────────
         ax_r.plot(x, df['RSI'], color='#c084fc', lw=1.0, label='RSI(14)')
+        if 'RSI_SMA14' in df.columns:
+            ax_r.plot(x, df['RSI_SMA14'], color='#f0b429', lw=0.8, ls='--', label='SMA(14) of RSI')
         ax_r.axhline(70, color='#ff6b6b', lw=0.6, ls='--', alpha=0.6)
         ax_r.axhline(50, color='#8b949e', lw=0.4, ls='-',  alpha=0.4)
         ax_r.axhline(30, color='#26d07c', lw=0.6, ls='--', alpha=0.6)
@@ -773,6 +1579,18 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
         ax_r.fill_between(x, df['RSI'], 30, where=df['RSI']<=30, color='#26d07c', alpha=0.12)
         ax_r.set_ylim(0, 100); ax_r.set_ylabel('RSI', color='#8b949e', fontsize=6.5)
         ax_r.yaxis.tick_right()
+
+        # Weekly/Monthly RSI direction -> combined MTF signal, shown right on
+        # the daily RSI panel so it's visible alongside the daily RSI reading.
+        if mtf_signal is not None:
+            mtf_colors = {'BUY': '#00ff88', 'SELL': '#ff4444', 'NEUTRAL': '#8b949e'}
+            w_arrow = '↑' if w_rsi_rising else ('↓' if w_rsi_rising is False else '·')
+            m_arrow = '↑' if m_rsi_rising else ('↓' if m_rsi_rising is False else '·')
+            mtf_txt = f'W-RSI{w_arrow} M-RSI{m_arrow}  MTF: {mtf_signal}'
+            ax_r.annotate(mtf_txt, xy=(0.99, 0.90), xycoords='axes fraction',
+                          ha='right', va='top', fontsize=6.5, fontweight='bold',
+                          color=mtf_colors.get(mtf_signal, '#8b949e'))
+
         ax_r.legend(fontsize=6, loc='upper left', facecolor='#161b22',
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_r.grid(True, alpha=0.25)
@@ -785,6 +1603,24 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
         ax_m.axhline(0, color='#8b949e', lw=0.4)
         ax_m.set_ylabel('MACD', color='#8b949e', fontsize=6.5)
         ax_m.yaxis.tick_right()
+
+        # Weekly/Monthly MACD(12,26,9) trend state — the automated version of
+        # manually checking "is either higher timeframe in a downtrend" before
+        # trusting a daily buy signal.
+        if w_macd_state is not None:
+            macd_state_colors = {'Uptrend': '#00ff88', 'Weakening': '#fbbf24',
+                                  'Reversing Up': '#58a6ff', 'Downtrend': '#ff6b6b', 'Unknown': '#8b949e'}
+            wc = macd_state_colors.get(w_macd_state, '#8b949e')
+            mc = macd_state_colors.get(m_macd_state, '#8b949e')
+            check = '✓ Confirmed' if mtf_macd_confirmed else '✗ Not Confirmed'
+            check_color = '#00ff88' if mtf_macd_confirmed else '#ff6b6b'
+            ax_m.annotate(f'W-MACD: {w_macd_state}', xy=(0.99, 0.92), xycoords='axes fraction',
+                          ha='right', va='top', fontsize=6.5, fontweight='bold', color=wc)
+            ax_m.annotate(f'M-MACD: {m_macd_state}', xy=(0.99, 0.78), xycoords='axes fraction',
+                          ha='right', va='top', fontsize=6.5, fontweight='bold', color=mc)
+            ax_m.annotate(check, xy=(0.99, 0.64), xycoords='axes fraction',
+                          ha='right', va='top', fontsize=6.5, fontweight='bold', color=check_color)
+
         ax_m.legend(fontsize=6, loc='upper left', facecolor='#161b22',
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_m.grid(True, alpha=0.25)
@@ -801,13 +1637,25 @@ def chart_daily(ticker, name, df_d, signals, fibs, boxes_d, is_blast, blast_scor
                     edgecolor='#30363d', labelcolor='#e6edf3')
         ax_u.grid(True, alpha=0.25)
 
+        # Trend Exit Score — shown right on the MACD(34,1000,20) panel since
+        # that's the chart you personally use for the sell decision.
+        if trend_exit_score is not None:
+            if trend_exit:
+                ax_u.axhspan(ax_u.get_ylim()[0], ax_u.get_ylim()[1], color='#ff4444', alpha=0.08)
+                exit_txt = f'🔔 TREND EXIT ({trend_exit_score})'
+                exit_color = '#ff6b6b'
+            else:
+                exit_txt = f'Trend Exit Score: {trend_exit_score}'
+                exit_color = '#8b949e'
+            ax_u.annotate(exit_txt, xy=(0.99, 0.90), xycoords='axes fraction',
+                          ha='right', va='top', fontsize=7, fontweight='bold', color=exit_color)
+
         plt.setp(ax_p.get_xticklabels(), visible=False)
         plt.setp(ax_v.get_xticklabels(), visible=False)
         plt.setp(ax_r.get_xticklabels(), visible=False)
         plt.setp(ax_m.get_xticklabels(), visible=False)
         ax_u.tick_params(axis='x', labelsize=7, rotation=30)
 
-        fig.tight_layout(rect=[0, 0, 1, 1])
         fig.savefig(out_path, dpi=90, bbox_inches='tight',
                     facecolor='#0d1117', edgecolor='none')
         plt.close(fig)
@@ -896,7 +1744,6 @@ def chart_weekly(ticker, name, df_w, boxes_w, resistance, support, channel_data,
 
         plt.setp(ax_p.get_xticklabels(), visible=False)
         plt.setp(ax_r.get_xticklabels(), visible=False)
-        fig.tight_layout(rect=[0, 0, 1, 1])
         fig.savefig(out_path, dpi=90, bbox_inches='tight',
                     facecolor='#0d1117', edgecolor='none')
         plt.close(fig)
@@ -981,7 +1828,6 @@ def chart_monthly(ticker, name, df_m, boxes_m, resistance, support, channel_data
 
         plt.setp(ax_p.get_xticklabels(), visible=False)
         plt.setp(ax_r.get_xticklabels(), visible=False)
-        fig.tight_layout(rect=[0, 0, 1, 1])
         fig.savefig(out_path, dpi=90, bbox_inches='tight',
                     facecolor='#0d1117', edgecolor='none')
         plt.close(fig)
@@ -1017,7 +1863,6 @@ def process_stock(name, ticker, df_raw=None):
         # Signals & Backtest
         signals   = generate_signals(df_d, df_w, df_m)
         trades    = backtest(df_d, signals)
-        fibs      = fibonacci_targets(df_d)
 
         # Support/Resistance on daily, weekly, monthly
         res_d, sup_d = find_support_resistance(df_d.tail(252), window=8)
@@ -1044,6 +1889,56 @@ def process_stock(name, ticker, df_raw=None):
         # Score
         score = compute_score(df_d, df_w, df_m, signals, is_blast)
 
+        # ── Trend-beginning-stage signals ──────────────────────────────────
+        # Fibonacci targets anchored to the actual base (most recent Darvas box)
+        # being broken out of, when one exists — a real measured-move target
+        # rather than a generic rolling-window guess.
+        fib_base = boxes_d[-1] if boxes_d else None
+        fibs = fibonacci_targets(df_d, base_box=fib_base)
+
+        stage_num, stage_label = detect_stage(df_d)
+        squeeze_info = detect_squeeze(df_d)
+        rsi_tgt      = rsi_momentum_target(df_d)
+        # Cross-sectional relative-strength raw score. Turned into an IBD-style
+        # 1-99 percentile "RS Rating" in main() once every stock's score is known
+        # (RS is inherently relative to the whole universe, not computable alone).
+        rs_raw = relative_strength_raw(df_d)
+
+        # ── New requested signals: BB/Donchian breakout (D/W/M), RSI-SMA
+        # trend filter, MTF RSI direction, RSI200/CCI200 crossovers ─────────
+        bb_break_d = bool(df_d['BB_UP_BREAK'].iloc[-1]) if not pd.isna(df_d['BB_UP_BREAK'].iloc[-1]) else False
+        bb_break_w = bool(df_w['BB_UP_BREAK'].iloc[-1]) if not pd.isna(df_w['BB_UP_BREAK'].iloc[-1]) else False
+        bb_break_m = bool(df_m['BB_UP_BREAK'].iloc[-1]) if not pd.isna(df_m['BB_UP_BREAK'].iloc[-1]) else False
+
+        don_break_d = bool(df_d['DON_BREAK'].iloc[-1]) if not pd.isna(df_d['DON_BREAK'].iloc[-1]) else False
+        don_break_w = bool(df_w['DON_BREAK'].iloc[-1]) if not pd.isna(df_w['DON_BREAK'].iloc[-1]) else False
+        don_break_m = bool(df_m['DON_BREAK'].iloc[-1]) if not pd.isna(df_m['DON_BREAK'].iloc[-1]) else False
+
+        rsi_sma14_bull = bool(df_d['RSI_SMA14_BULL'].iloc[-1]) if not pd.isna(df_d['RSI_SMA14'].iloc[-1]) else False
+
+        mtf_signal, w_rsi_rising, m_rsi_rising = mtf_rsi_signal(df_w, df_m)
+
+        rsi200_state, rsi200_cross = crossover_state(df_d['RSI200'], df_d['RSI200_SMA34'])
+        cci200_state, cci200_cross = crossover_state(df_d['CCI200'], df_d['CCI200_SMA34'])
+
+        # MACD(34,1000,20) on daily — a well-known discretionary sell signal.
+        macd_us_state, macd_us_cross = crossover_state(df_d['MACD_US'], df_d['MACD_US_sig'])
+
+        # Weekly/Monthly MACD(12,26,9) trend state — mirrors manually checking
+        # "is either higher timeframe in a downtrend" before trusting a daily buy.
+        w_macd_state = macd_trend_state(df_w)
+        m_macd_state = macd_trend_state(df_m)
+        mtf_macd_confirmed = (w_macd_state not in ('Downtrend',)) and (m_macd_state not in ('Downtrend',))
+
+        # Monthly RSI(14)/SMA(14) and CCI(20)/SMA(20) bearish crossovers.
+        m_rsi_sma_state, m_rsi_sma_cross = crossover_state(df_m['RSI'], df_m['RSI_SMA14'])
+        m_cci_state, m_cci_cross = crossover_state(df_m['CCI20'], df_m['CCI20_SMA20'])
+
+        # Chart pattern recognition (daily) — Double Top/Bottom, Head & Shoulders,
+        # Triangles, Cup & Handle, via ZigZag swing-pivot geometry.
+        chart_patterns   = detect_chart_patterns(df_d)
+        primary_pattern  = pick_primary_pattern(chart_patterns)
+
         # Key metrics
         cur_price  = float(df_d['Close'].iloc[-1])
         ath_val    = float(df_d['ATH'].iloc[-1])
@@ -1055,6 +1950,20 @@ def process_stock(name, ticker, df_raw=None):
         vol_ratio  = float(df_d['VOL_RATIO'].iloc[-1]) if not pd.isna(df_d['VOL_RATIO'].iloc[-1]) else 1.0
         adx_val    = float(df_d['ADX'].iloc[-1]) if not pd.isna(df_d['ADX'].iloc[-1]) else 0
         last_sig   = signals.iloc[-1]
+
+        # Trend Exit Score — position-trading exit signal (see function docstring
+        # for why this differs from generate_signals()'s tactical daily SELL).
+        trend_exit_score = compute_trend_exit_score(
+            stage_num=stage_num, mtf_signal=mtf_signal,
+            dv_w_status=dv_w_status, dv_m_status=dv_m_status,
+            rsi200_state=rsi200_state, rsi200_cross=rsi200_cross,
+            d_rsi_val=d_rsi_val,
+            macd_us_state=macd_us_state, macd_us_cross=macd_us_cross,
+            w_macd_state=w_macd_state, m_macd_state=m_macd_state,
+            m_rsi_sma_state=m_rsi_sma_state, m_rsi_sma_cross=m_rsi_sma_cross,
+            m_cci_state=m_cci_state, m_cci_cross=m_cci_cross,
+        )
+        trend_exit = trend_exit_score >= 40
 
         # Backtest stats
         closed = [t for t in trades if not t.get('open')]
@@ -1074,7 +1983,13 @@ def process_stock(name, ticker, df_raw=None):
 
         if not chart_is_fresh(path_d):
             chart_daily(ticker, name, df_d, signals, fibs, boxes_d,
-                        is_blast, blast_score, res_d, sup_d, path_d)
+                        is_blast, blast_score, res_d, sup_d, path_d,
+                        stage_label=stage_label,
+                        mtf_signal=mtf_signal, w_rsi_rising=w_rsi_rising, m_rsi_rising=m_rsi_rising,
+                        primary_pattern=primary_pattern,
+                        w_macd_state=w_macd_state, m_macd_state=m_macd_state,
+                        mtf_macd_confirmed=mtf_macd_confirmed,
+                        trend_exit=trend_exit, trend_exit_score=trend_exit_score)
         if not chart_is_fresh(path_w):
             chart_weekly(ticker, name, df_w, boxes_w, res_w, sup_w, ch_w, path_w)
         if not chart_is_fresh(path_m):
@@ -1087,6 +2002,7 @@ def process_stock(name, ticker, df_raw=None):
             'macd_us': macd_us_v, 'adx': adx_val, 'vol_ratio': vol_ratio,
             'signal': last_sig, 'score': score,
             'trades': len(trades), 'win_rate': win_rate, 'avg_ret': avg_ret,
+            'trade_list': trades,   # full per-trade history, used by the separate trades report
             'fibs': fibs,
             # IPO / listing metadata
             'data_days': data_days,
@@ -1095,6 +2011,37 @@ def process_stock(name, ticker, df_raw=None):
             'is_new_ipo': is_new_ipo,
             # Blast
             'blast': is_blast, 'blast_score': blast_score, 'blast_reason': blast_reason,
+            # Trend-beginning-stage signals
+            'stage_num': stage_num, 'stage_label': stage_label,
+            'squeeze_now': squeeze_info['in_squeeze_now'],
+            'squeeze_recent': squeeze_info['squeeze_recent'],
+            'bb_width_pctile': (round(squeeze_info['bb_width_pctile'], 1)
+                                 if not pd.isna(squeeze_info['bb_width_pctile']) else None),
+            'rsi_target': rsi_tgt['target'],
+            'rsi_target_gain_pct': rsi_tgt['median_gain_pct'],
+            'rsi_target_samples': rsi_tgt['sample_count'],
+            'rs_raw': rs_raw,   # converted to rs_rating (1-99 percentile) in main()
+            # Bollinger / Donchian breakouts across all 3 timeframes
+            'bb_break_d': bb_break_d, 'bb_break_w': bb_break_w, 'bb_break_m': bb_break_m,
+            'don_break_d': don_break_d, 'don_break_w': don_break_w, 'don_break_m': don_break_m,
+            # RSI trend filters
+            'rsi_sma14_bull': rsi_sma14_bull,
+            'mtf_rsi_signal': mtf_signal, 'w_rsi_rising': w_rsi_rising, 'm_rsi_rising': m_rsi_rising,
+            'rsi200_state': rsi200_state, 'rsi200_cross': rsi200_cross,
+            'cci200_state': cci200_state, 'cci200_cross': cci200_cross,
+            # MACD(34,1000,20) daily sell signal + weekly/monthly MACD(12,26,9) trend state
+            'macd_us_state': macd_us_state, 'macd_us_cross': macd_us_cross,
+            'w_macd_state': w_macd_state, 'm_macd_state': m_macd_state,
+            'mtf_macd_confirmed': mtf_macd_confirmed,
+            # Monthly RSI(14)/SMA(14) and CCI(20)/SMA(20) crossovers
+            'm_rsi_sma_state': m_rsi_sma_state, 'm_rsi_sma_cross': m_rsi_sma_cross,
+            'm_cci_state': m_cci_state, 'm_cci_cross': m_cci_cross,
+            # Chart patterns
+            'chart_patterns': chart_patterns,
+            'primary_pattern': primary_pattern,
+            # Trend Exit Score (position-trading exit signal)
+            'trend_exit_score': trend_exit_score,
+            'trend_exit': trend_exit,
             # Support / Resistance
             'res_d': [round(r, 2) for r in res_d[:3]],
             'sup_d': [round(s, 2) for s in sup_d[:3]],
@@ -1105,13 +2052,28 @@ def process_stock(name, ticker, df_raw=None):
             'darvas_w': dv_w_status, 'darvas_w_top': dv_w_top, 'darvas_w_bot': dv_w_bot,
             'darvas_m': dv_m_status, 'darvas_m_top': dv_m_top, 'darvas_m_bot': dv_m_bot,
             # Chart paths
-            'chart_d': f"/charts/multibagger/{safe_sym}_daily.png",
-            'chart_w': f"/charts/multibagger/{safe_sym}_weekly.png",
-            'chart_m': f"/charts/multibagger/{safe_sym}_monthly.png",
+            'chart_d': f"charts/multibagger/{safe_sym}_daily.png",
+            'chart_w': f"charts/multibagger/{safe_sym}_weekly.png",
+            'chart_m': f"charts/multibagger/{safe_sym}_monthly.png",
         }
     except Exception as e:
         tprint(f"  ⚠️  {ticker}: {e}")
         return None
+
+
+def _process_stock_task(args):
+    """Top-level picklable wrapper around process_stock() for ProcessPoolExecutor.
+
+    Must live at module scope (not as a nested/local function) — ProcessPoolExecutor
+    pickles the callable to send it to worker processes, and on Windows (spawn start
+    method in particular) closures/local functions cannot be pickled.
+    """
+    name, ticker, df_raw = args
+    try:
+        return name, ticker, process_stock(name, ticker, df_raw)
+    except Exception as e:
+        tprint(f"  ⚠️  {ticker}: {e}")
+        return name, ticker, None
 
 # ── HTML Builder ──────────────────────────────────────────────────────────────
 def sig_badge(sig):
@@ -1138,6 +2100,147 @@ def darvas_badge(status):
     colors = {'BREAKOUT': '#00ff88', 'BREAKDOWN': '#ff4444', 'IN BOX': '#fbbf24', 'None': '#555'}
     c = colors.get(status, '#555')
     return f'<span style="color:{c};font-size:11px;font-weight:600;">{status}</span>'
+
+def stage_badge(stage_num, stage_label):
+    colors = {2: ('#00ff88', '#003319'), 1: ('#fbbf24', '#1a1200'),
+              3: ('#ff9800', '#1a0a00'), 4: ('#ff6b6b', '#2c0000'), 0: ('#555', '#1a1f2c')}
+    c, bg = colors.get(stage_num, ('#555', '#1a1f2c'))
+    tip = {2: 'Above a rising SMA150 — classic trend-beginning zone',
+           1: 'Basing near a flat SMA150 — pre-breakout consolidation',
+           3: 'Above SMA150 but the MA has stopped rising — trend may be maturing',
+           4: 'Below a falling SMA150 — downtrend',
+           0: 'Not enough history to classify'}.get(stage_num, '')
+    return (f'<span style="background:{bg};color:{c};border:1px solid {c};border-radius:4px;'
+            f'padding:2px 7px;font-size:10px;font-weight:700;" title="{tip}">{stage_label}</span>')
+
+def squeeze_badge(squeeze_now, squeeze_recent):
+    if squeeze_now:
+        return ('<span style="color:#c084fc;font-size:11px;font-weight:700;" '
+                'title="Bollinger Band width is in the tightest 20% of the last 120 days right now">'
+                '🌀 Tight</span>')
+    if squeeze_recent:
+        return ('<span style="color:#58a6ff;font-size:11px;font-weight:700;" '
+                'title="Was in a volatility squeeze within the last 10 days — may be expanding out of a base">'
+                '↗ Firing</span>')
+    return '<span style="color:#444;font-size:11px;">—</span>'
+
+def rs_rating_display(rs_rating):
+    if rs_rating is None:
+        return '<span style="color:#444;font-size:11px;">—</span>'
+    if rs_rating >= 80: color = '#00ff88'
+    elif rs_rating >= 60: color = '#26d07c'
+    elif rs_rating >= 40: color = '#8b949e'
+    else: color = '#ff6b6b'
+    return (f'<span style="color:{color};font-weight:700;font-size:12px;" '
+            f'title="Percentile rank vs all stocks scanned today (IBD-style RS Rating)">'
+            f'{rs_rating:.0f}</span>')
+
+def early_trend_badge(is_early, score):
+    if not is_early:
+        return f'<span style="color:#444;font-size:11px;">{score}</span>'
+    return (f'<span style="background:#04140a;color:#00ff88;border:1px solid #00ff88;'
+            f'border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;" '
+            f'title="Stage + squeeze + volume + RSI + ADX + RS Rating combined">'
+            f'🌱 {score}</span>')
+
+def timeframe_break_badge(brk_d, brk_w, brk_m, label):
+    """Compact D/W/M pill set for a breakout flag (BB upper band, Donchian, etc.)."""
+    def pill(active, tf):
+        if active:
+            return (f'<span style="background:#04140a;color:#00ff88;border:1px solid #00ff88;'
+                     f'border-radius:3px;padding:1px 4px;font-size:9px;font-weight:700;margin-right:2px;">{tf}</span>')
+        return f'<span style="color:#333;font-size:9px;margin-right:2px;">{tf}</span>'
+    return (f'<span title="{label} breakout — Daily / Weekly / Monthly">'
+            f'{pill(brk_d,"D")}{pill(brk_w,"W")}{pill(brk_m,"M")}</span>')
+
+def rsi_sma_badge(bull):
+    if bull:
+        return ('<span style="color:#00ff88;font-size:11px;font-weight:700;" '
+                'title="SMA(14) of RSI(14) is above 50 — bullish momentum regime">▲ Bull</span>')
+    return '<span style="color:#8b949e;font-size:11px;" title="SMA(14) of RSI(14) is below 50">▽ Neutral</span>'
+
+def mtf_signal_badge(signal):
+    colors = {'BUY': ('#00ff88', '#04140a'), 'SELL': ('#ff4444', '#1a0000'),
+              'NEUTRAL': ('#8b949e', '#161b22')}
+    c, bg = colors.get(signal, ('#8b949e', '#161b22'))
+    return (f'<span style="background:{bg};color:{c};border:1px solid {c};border-radius:4px;'
+            f'padding:2px 7px;font-size:10px;font-weight:700;" '
+            f'title="Weekly RSI(14) and Monthly RSI(14) both rising = BUY, both falling = SELL">'
+            f'{signal}</span>')
+
+def crossover_badge(state, cross, label):
+    colors = {'Bullish': '#00ff88', 'Bearish': '#ff6b6b', 'Unknown': '#444'}
+    c = colors.get(state, '#444')
+    fresh = ''
+    if cross == 'Bull Cross':
+        fresh = ' 🔥'
+    elif cross == 'Bear Cross':
+        fresh = ' ⚠️'
+    tip = f'{label}: {state}' + (f' — fresh {cross} within last 5 bars' if cross else '')
+    return f'<span style="color:{c};font-size:10px;font-weight:700;" title="{tip}">{state}{fresh}</span>'
+
+PATTERN_ICONS = {
+    'Double Top':          '📉 Ⓜ',
+    'Double Bottom':       '📈 Ⓦ',
+    'Head & Shoulders':    '📉 H&S',
+    'Inverse H&S':         '📈 Inv H&S',
+    'Ascending Triangle':  '📈 ◺',
+    'Descending Triangle': '📉 ◹',
+    'Symmetrical Triangle':'🔺 Sym',
+    'Cup & Handle':        '☕',
+}
+
+def pattern_badge(primary_pattern, all_patterns=None):
+    if not primary_pattern:
+        return '<span style="color:#333;font-size:11px;">—</span>'
+    name   = primary_pattern['name']
+    status = primary_pattern['status']
+    direction = primary_pattern['direction']
+    icon = PATTERN_ICONS.get(name, '◆')
+    dir_color = {'bullish': '#00ff88', 'bearish': '#ff6b6b', 'neutral': '#f0b429'}.get(direction, '#8b949e')
+
+    extra_n = len(all_patterns) - 1 if all_patterns and len(all_patterns) > 1 else 0
+    extra_txt = f' +{extra_n}' if extra_n else ''
+    lvl = primary_pattern.get('key_level')
+    lvl_txt = f" | Level: {fmt_price(lvl)}" if lvl else ''
+    tip = f"{name} ({status}){lvl_txt}"
+    if extra_n:
+        others = ', '.join(f"{p['name']} ({p['status']})" for p in all_patterns if p is not primary_pattern)
+        tip += f" | Also detected: {others}"
+
+    if status == 'confirmed':
+        return (f'<span style="background:#04140a;color:{dir_color};border:1px solid {dir_color};'
+                f'border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;" title="{tip}">'
+                f'{icon} {name}{extra_txt}</span>')
+    return (f'<span style="color:{dir_color};font-size:10px;font-weight:600;opacity:0.75;" title="{tip}">'
+            f'{icon} {name} (forming){extra_txt}</span>')
+
+def trend_exit_badge(trend_exit, score):
+    tip = ("Structural exit signal for position trades: Stage flipped to Topping/Declining, "
+           "and/or MTF RSI at SELL, and/or Weekly/Monthly Darvas breakdown, and/or RSI(200)/SMA(34) "
+           "turned Bearish, and/or MACD(34,1000,20) bearish, and/or Weekly/Monthly MACD(12,26,9) "
+           "in a Downtrend, and/or Monthly RSI-SMA(14)/CCI-SMA(20) bearish. "
+           "Review the position — not an automatic sell instruction.")
+    if trend_exit:
+        return (f'<span style="background:#1a0000;color:#ff6b6b;border:1px solid #ff6b6b;'
+                f'border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;" title="{tip}">'
+                f'🔔 {score}</span>')
+    return f'<span style="color:#444;font-size:11px;" title="{tip}">{score}</span>'
+
+MACD_STATE_COLORS = {'Uptrend': '#00ff88', 'Weakening': '#fbbf24',
+                      'Reversing Up': '#58a6ff', 'Downtrend': '#ff6b6b', 'Unknown': '#444'}
+
+def mtf_macd_badge(w_state, m_state, confirmed):
+    wc = MACD_STATE_COLORS.get(w_state, '#444')
+    mc = MACD_STATE_COLORS.get(m_state, '#444')
+    tip = (f"Weekly MACD(12,26,9): {w_state}  |  Monthly MACD(12,26,9): {m_state}  |  "
+           f"{'Confirms the daily buy — neither timeframe is in a Downtrend' if confirmed else 'Does NOT confirm — check before trusting this buy'}")
+    check = '✓' if confirmed else '✗'
+    check_color = '#00ff88' if confirmed else '#ff6b6b'
+    return (f'<span style="font-size:10px;" title="{tip}">'
+            f'<span style="color:{wc};font-weight:700;">W:{w_state}</span> '
+            f'<span style="color:{mc};font-weight:700;">M:{m_state}</span> '
+            f'<span style="color:{check_color};font-weight:900;">{check}</span></span>')
 
 def rsi_color(v):
     if v >= 70: return '#ff6b6b'
@@ -1186,6 +2289,47 @@ def build_html(results, scan_time, total_scanned, total_ok):
         btn_w = chart_modal_btn(sym, 'Weekly',  r['chart_w'])
         btn_m = chart_modal_btn(sym, 'Monthly', r['chart_m'])
 
+        # New trend-beginning-stage fields — .get() with fallbacks so same-day
+        # cache entries written before this feature existed don't crash the report.
+        stage_num   = r.get('stage_num', 0)
+        stage_label = r.get('stage_label', 'Unknown')
+        early_score = r.get('early_trend_score', 0)
+        is_early    = r.get('early_trend', False)
+        rs_rating   = r.get('rs_rating')
+        sq_now      = r.get('squeeze_now', False)
+        sq_recent   = r.get('squeeze_recent', False)
+        fibs        = r.get('fibs') or {}
+        fib_target  = fibs.get('fib_1618')
+        fib_anchor  = 'base' if fibs.get('base_anchored') else '252d range'
+        fib_tip     = (f"0.618: {fmt_price(fibs.get('fib_0618'))}  |  2.618: {fmt_price(fibs.get('fib_2618'))}  "
+                       f"|  anchor: {fib_anchor}") if fibs else ''
+        rsi_target      = r.get('rsi_target')
+        rsi_target_gain = r.get('rsi_target_gain_pct')
+        rsi_target_n    = r.get('rsi_target_samples', 0)
+        rsi_tip = (f"Median of {rsi_target_n} historical analogs: {rsi_target_gain:+.1f}%"
+                   if rsi_target is not None else f"Only {rsi_target_n} historical analogs — not enough to trust")
+
+        bb_d, bb_w, bb_m   = r.get('bb_break_d', False), r.get('bb_break_w', False), r.get('bb_break_m', False)
+        don_d, don_w, don_m = r.get('don_break_d', False), r.get('don_break_w', False), r.get('don_break_m', False)
+        rsi_sma_bull    = r.get('rsi_sma14_bull', False)
+        mtf_sig         = r.get('mtf_rsi_signal', 'NEUTRAL')
+        rsi200_state    = r.get('rsi200_state', 'Unknown')
+        rsi200_cross    = r.get('rsi200_cross')
+        cci200_state    = r.get('cci200_state', 'Unknown')
+        cci200_cross    = r.get('cci200_cross')
+        w_macd_state    = r.get('w_macd_state', 'Unknown')
+        m_macd_state    = r.get('m_macd_state', 'Unknown')
+        mtf_macd_ok     = r.get('mtf_macd_confirmed', False)
+        any_bb_break    = bb_d or bb_w or bb_m
+        any_don_break   = don_d or don_w or don_m
+        chart_patterns  = r.get('chart_patterns') or []
+        primary_pattern = r.get('primary_pattern')
+        pat_name = primary_pattern['name'] if primary_pattern else 'None'
+        pat_dir  = primary_pattern['direction'] if primary_pattern else 'none'
+        pat_status = primary_pattern['status'] if primary_pattern else 'none'
+        trend_exit_score = r.get('trend_exit_score', 0)
+        trend_exit_flag  = r.get('trend_exit', False)
+
         rows_html.append(f"""
 <tr class="stock-row {'blast-row' if r['blast'] else ''}"
     data-signal="{r['signal']}"
@@ -1194,7 +2338,20 @@ def build_html(results, scan_time, total_scanned, total_ok):
     data-mrsi="{r['m_rsi']:.1f}"
     data-wrsi="{r['w_rsi']:.1f}"
     data-drsi="{r['d_rsi']:.1f}"
-    data-darvas="{r['darvas_d']}">
+    data-darvas="{r['darvas_d']}"
+    data-early="{1 if is_early else 0}"
+    data-stage="{stage_num}"
+    data-bbbreak="{1 if any_bb_break else 0}"
+    data-donbreak="{1 if any_don_break else 0}"
+    data-rsisma="{1 if rsi_sma_bull else 0}"
+    data-mtfsig="{mtf_sig}"
+    data-rsi200="{rsi200_state}"
+    data-cci200="{cci200_state}"
+    data-mtfmacd="{1 if mtf_macd_ok else 0}"
+    data-pattern="{pat_name}"
+    data-patterndir="{pat_dir}"
+    data-patternstatus="{pat_status}"
+    data-exit="{1 if trend_exit_flag else 0}">
   <td style="color:#555;font-size:11px;padding:6px 4px;">{i}</td>
   <td style="padding:6px 8px;min-width:130px;">
     <div style="font-weight:700;color:#e6edf3;font-size:12px;">{r['symbol']}</div>
@@ -1211,6 +2368,21 @@ def build_html(results, scan_time, total_scanned, total_ok):
   <td style="padding:6px 8px;">{blast_badge(r['blast'], r['blast_score'], r['blast_reason'])}</td>
   <td style="padding:6px 8px;">{sig_badge(r['signal'])}</td>
   <td style="padding:6px 4px;color:#e6edf3;font-weight:700;font-size:13px;">{r['score']}</td>
+  <td style="padding:6px 6px;">{stage_badge(stage_num, stage_label)}</td>
+  <td style="padding:6px 6px;">{early_trend_badge(is_early, early_score)}</td>
+  <td style="padding:6px 4px;">{rs_rating_display(rs_rating)}</td>
+  <td style="padding:6px 6px;">{squeeze_badge(sq_now, sq_recent)}</td>
+  <td style="padding:6px 4px;color:#e6edf3;font-size:11px;" title="{fib_tip}">{fmt_price(fib_target) if fib_target else '—'}</td>
+  <td style="padding:6px 4px;color:#e6edf3;font-size:11px;" title="{rsi_tip}">{fmt_price(rsi_target) if rsi_target else '—'}</td>
+  <td style="padding:6px 6px;">{timeframe_break_badge(bb_d, bb_w, bb_m, 'Bollinger Band upper')}</td>
+  <td style="padding:6px 6px;">{timeframe_break_badge(don_d, don_w, don_m, 'Donchian Channel')}</td>
+  <td style="padding:6px 6px;">{rsi_sma_badge(rsi_sma_bull)}</td>
+  <td style="padding:6px 6px;">{mtf_signal_badge(mtf_sig)}</td>
+  <td style="padding:6px 6px;">{mtf_macd_badge(w_macd_state, m_macd_state, mtf_macd_ok)}</td>
+  <td style="padding:6px 6px;">{crossover_badge(rsi200_state, rsi200_cross, 'RSI(200)/SMA(34)')}</td>
+  <td style="padding:6px 6px;">{crossover_badge(cci200_state, cci200_cross, 'CCI(200)/SMA(34)')}</td>
+  <td style="padding:6px 6px;">{pattern_badge(primary_pattern, chart_patterns)}</td>
+  <td style="padding:6px 6px;">{trend_exit_badge(trend_exit_flag, trend_exit_score)}</td>
   <td style="padding:6px 6px;">{darvas_badge(r['darvas_d'])}</td>
   <td style="padding:6px 6px;">{darvas_badge(r['darvas_w'])}</td>
   <td style="padding:6px 6px;">{darvas_badge(r['darvas_m'])}</td>
@@ -1324,9 +2496,35 @@ tbody tr:hover{{background:#161b2255}}
   <input type="text" id="searchBox" placeholder="🔍  Search ticker or company…" oninput="filterTable()">
 
   <button class="filter-btn blast-btn" id="blastBtn" onclick="toggleFilter('blast')">🚀 BLAST Only</button>
+  <button class="filter-btn" id="earlyBtn" onclick="toggleFilter('early')" title="Stage 1/2 + squeeze + volume + RSI + ADX + RS Rating combined">🌱 Early Trend</button>
   <button class="filter-btn" id="buyBtn"   onclick="toggleFilter('buy')">📈 BUY Signals</button>
   <button class="filter-btn" id="mrsi70Btn" onclick="toggleFilter('mrsi70')">💜 M-RSI &gt; 70</button>
   <button class="filter-btn" id="dboxBtn"  onclick="toggleFilter('darvas')">📦 Darvas Break</button>
+  <button class="filter-btn" id="bbBtn"    onclick="toggleFilter('bbbreak')" title="Close above the upper Bollinger Band on any timeframe">📊 BB Breakout</button>
+  <button class="filter-btn" id="donBtn"   onclick="toggleFilter('donbreak')" title="Close above the Donchian Channel high on any timeframe">🌊 Donchian Break</button>
+  <button class="filter-btn" id="rsismaBtn" onclick="toggleFilter('rsisma')" title="SMA(14) of RSI(14) above 50">💪 RSI-SMA Bull</button>
+  <button class="filter-btn" id="mtfBuyBtn" onclick="toggleFilter('mtfbuy')" title="Weekly + Monthly RSI both rising">🔀 MTF RSI Buy</button>
+  <button class="filter-btn" id="rsi200Btn" onclick="toggleFilter('rsi200')" title="RSI(200) above its SMA(34)">📐 RSI200 Bull</button>
+  <button class="filter-btn" id="cci200Btn" onclick="toggleFilter('cci200')" title="CCI(200) above its SMA(34)">📐 CCI200 Bull</button>
+  <select id="patternFilter" onchange="setPatternFilter(this.value)"
+          style="background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
+                 padding:5px 10px;font-size:12px;font-family:inherit;cursor:pointer;">
+    <option value="all">📐 Chart Pattern: All</option>
+    <option value="any">Any Pattern Detected</option>
+    <option value="bullish">Any Bullish Pattern</option>
+    <option value="bearish">Any Bearish Pattern</option>
+    <option value="confirmed">Confirmed Only</option>
+    <option value="Double Top">Double Top</option>
+    <option value="Double Bottom">Double Bottom</option>
+    <option value="Head & Shoulders">Head &amp; Shoulders</option>
+    <option value="Inverse H&S">Inverse H&amp;S</option>
+    <option value="Ascending Triangle">Ascending Triangle</option>
+    <option value="Descending Triangle">Descending Triangle</option>
+    <option value="Symmetrical Triangle">Symmetrical Triangle</option>
+    <option value="Cup & Handle">Cup &amp; Handle</option>
+  </select>
+  <button class="filter-btn" id="exitBtn" onclick="toggleFilter('exit')" title="Position-trade exit signal: Stage flip to Topping/Declining, MTF RSI SELL, Weekly/Monthly Darvas breakdown, or RSI200/SMA34 turning Bearish">🔔 Trend Exit</button>
+  <button class="filter-btn" id="mtfmacdBtn" onclick="toggleFilter('mtfmacd')" title="Weekly AND Monthly MACD(12,26,9) both confirm — neither is in a Downtrend">🎯 MTF MACD OK</button>
   <button class="filter-btn" id="allBtn"   onclick="clearFilters()" style="color:#26d07c;border-color:#26d07c;">Show All</button>
 
   <span class="count-badge" id="countBadge">{total_ok} stocks</span>
@@ -1353,14 +2551,29 @@ tbody tr:hover{{background:#161b2255}}
   <th onclick="sortTable(8,'str')">🚀 BLAST</th>
   <th onclick="sortTable(9,'str')">Signal</th>
   <th onclick="sortTable(10,'num')">Score</th>
-  <th onclick="sortTable(11,'str')">Darvas D</th>
-  <th onclick="sortTable(12,'str')">Darvas W</th>
-  <th onclick="sortTable(13,'str')">Darvas M</th>
+  <th onclick="sortTable(11,'str')" title="Weinstein-style stage: Basing -> Advancing (trend beginning) -> Topping -> Declining">Stage</th>
+  <th onclick="sortTable(12,'num')" title="Combined trend-beginning score: Stage + Squeeze + Volume + RSI + ADX + RS Rating">🌱 Early</th>
+  <th onclick="sortTable(13,'num')" title="IBD-style percentile rank vs all stocks scanned today (1-99)">RS Rtg</th>
+  <th onclick="sortTable(14,'str')" title="Bollinger Band volatility contraction — a coiling base often precedes breakouts">Squeeze</th>
+  <th onclick="sortTable(15,'num')" title="Fibonacci 1.618 extension target, anchored to the base breakout when detected">Fib Tgt</th>
+  <th onclick="sortTable(16,'num')" title="Median historical price move after RSI entered this same 55-65 zone">RSI Tgt</th>
+  <th title="Close above the upper Bollinger Band — Daily/Weekly/Monthly">BB Break</th>
+  <th title="Close above the prior 20-period Donchian Channel high — Daily/Weekly/Monthly">Donchian</th>
+  <th onclick="sortTable(19,'str')" title="SMA(14) of RSI(14) above 50 — sustained bullish momentum regime">RSI-SMA</th>
+  <th onclick="sortTable(20,'str')" title="Weekly RSI(14) + Monthly RSI(14) direction combined: both rising=BUY, both falling=SELL">MTF RSI</th>
+  <th title="Weekly + Monthly MACD(12,26,9) trend state — checks whether the higher timeframes confirm a daily buy, the same way you'd check manually">MTF MACD</th>
+  <th onclick="sortTable(22,'str')" title="RSI(200) vs its own SMA(34) — a slow, high-conviction trend-shift signal">RSI200/34</th>
+  <th onclick="sortTable(23,'str')" title="CCI(200) vs its own SMA(34)">CCI200/34</th>
+  <th onclick="sortTable(24,'str')" title="Double Top/Bottom, Head & Shoulders, Triangles, Cup & Handle — detected via swing-pivot geometry">Pattern</th>
+  <th onclick="sortTable(25,'num')" title="Position-trade exit signal: Stage flip to Topping/Declining, MTF RSI SELL, Weekly/Monthly Darvas breakdown, RSI200/SMA34 or MACD(34,1000,20) turning bearish, Weekly/Monthly MACD downtrend, or Monthly RSI-SMA/CCI-SMA bearish. Not the same as the tactical daily SELL signal.">🔔 Exit</th>
+  <th onclick="sortTable(26,'str')">Darvas D</th>
+  <th onclick="sortTable(27,'str')">Darvas W</th>
+  <th onclick="sortTable(28,'str')">Darvas M</th>
   <th>Resistance</th>
   <th>Support</th>
-  <th onclick="sortTable(16,'num')">Vol</th>
-  <th onclick="sortTable(17,'num')">Trades</th>
-  <th onclick="sortTable(18,'num')">Win%</th>
+  <th onclick="sortTable(31,'num')">Vol</th>
+  <th onclick="sortTable(32,'num')">Trades</th>
+  <th onclick="sortTable(33,'num')">Win%</th>
   <th>Charts</th>
 </tr>
 </thead>
@@ -1392,6 +2605,7 @@ tbody tr:hover{{background:#161b2255}}
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 let activeFilter = null;
+let patternFilterVal = 'all';
 let sortCol = 10, sortDir = -1;  // default: sort by score desc
 
 let currentSym = '', currentUrls = {{}};
@@ -1407,31 +2621,57 @@ function filterTable() {{
     let   matchFilter = true;
 
     if (activeFilter === 'blast')  matchFilter = r.dataset.blast  === '1';
+    if (activeFilter === 'early')  matchFilter = r.dataset.early  === '1';
     if (activeFilter === 'buy')    matchFilter = ['STRONG BUY','MACD MEGA BUY','BUY','VOL BUY','M-RSI BUY'].includes(r.dataset.signal);
     if (activeFilter === 'mrsi70') matchFilter = parseFloat(r.dataset.mrsi) >= 70;
     if (activeFilter === 'darvas') matchFilter = r.dataset.darvas === 'BREAKOUT';
+    if (activeFilter === 'bbbreak')  matchFilter = r.dataset.bbbreak  === '1';
+    if (activeFilter === 'donbreak') matchFilter = r.dataset.donbreak === '1';
+    if (activeFilter === 'rsisma')   matchFilter = r.dataset.rsisma   === '1';
+    if (activeFilter === 'mtfbuy')   matchFilter = r.dataset.mtfsig   === 'BUY';
+    if (activeFilter === 'rsi200')   matchFilter = r.dataset.rsi200   === 'Bullish';
+    if (activeFilter === 'cci200')   matchFilter = r.dataset.cci200   === 'Bullish';
+    if (activeFilter === 'exit')     matchFilter = r.dataset.exit     === '1';
+    if (activeFilter === 'mtfmacd')  matchFilter = r.dataset.mtfmacd  === '1';
 
-    const show = matchSearch && matchFilter;
+    let matchPattern = true;
+    const pv = patternFilterVal;
+    if (pv === 'any')       matchPattern = r.dataset.pattern !== 'None';
+    else if (pv === 'bullish')  matchPattern = r.dataset.patterndir === 'bullish';
+    else if (pv === 'bearish')  matchPattern = r.dataset.patterndir === 'bearish';
+    else if (pv === 'confirmed') matchPattern = r.dataset.patternstatus === 'confirmed';
+    else if (pv !== 'all')   matchPattern = r.dataset.pattern === pv;
+
+    const show = matchSearch && matchFilter && matchPattern;
     r.classList.toggle('hidden', !show);
     if (show) vis++;
   }});
   document.getElementById('countBadge').textContent = vis + ' stocks';
 }}
 
+function setPatternFilter(val) {{
+  patternFilterVal = val;
+  filterTable();
+}}
+
 function toggleFilter(name) {{
   activeFilter = (activeFilter === name) ? null : name;
-  ['blastBtn','buyBtn','mrsi70Btn','dboxBtn'].forEach(id => {{
+  ['blastBtn','earlyBtn','buyBtn','mrsi70Btn','dboxBtn','bbBtn','donBtn','rsismaBtn','mtfBuyBtn','rsi200Btn','cci200Btn','exitBtn','mtfmacdBtn'].forEach(id => {{
     document.getElementById(id).classList.remove('active');
   }});
-  const map = {{blast:'blastBtn',buy:'buyBtn',mrsi70:'mrsi70Btn',darvas:'dboxBtn'}};
+  const map = {{blast:'blastBtn',early:'earlyBtn',buy:'buyBtn',mrsi70:'mrsi70Btn',darvas:'dboxBtn',
+                bbbreak:'bbBtn',donbreak:'donBtn',rsisma:'rsismaBtn',mtfbuy:'mtfBuyBtn',
+                rsi200:'rsi200Btn',cci200:'cci200Btn',exit:'exitBtn',mtfmacd:'mtfmacdBtn'}};
   if (activeFilter && map[activeFilter]) document.getElementById(map[activeFilter]).classList.add('active');
   filterTable();
 }}
 
 function clearFilters() {{
   activeFilter = null;
+  patternFilterVal = 'all';
   document.getElementById('searchBox').value = '';
-  ['blastBtn','buyBtn','mrsi70Btn','dboxBtn'].forEach(id => document.getElementById(id).classList.remove('active'));
+  document.getElementById('patternFilter').value = 'all';
+  ['blastBtn','earlyBtn','buyBtn','mrsi70Btn','dboxBtn','bbBtn','donBtn','rsismaBtn','mtfBuyBtn','rsi200Btn','cci200Btn','exitBtn','mtfmacdBtn'].forEach(id => document.getElementById(id).classList.remove('active'));
   filterTable();
 }}
 
@@ -1458,9 +2698,9 @@ function showChart(sym, tab, url) {{
   // Build all 3 URLs from the daily URL pattern
   const base = url.replace(/_daily|_weekly|_monthly/, '');
   currentUrls = {{
-    d: `/charts/multibagger/${{sym}}_daily.png`,
-    w: `/charts/multibagger/${{sym}}_weekly.png`,
-    m: `/charts/multibagger/${{sym}}_monthly.png`,
+    d: `charts/multibagger/${{sym}}_daily.png`,
+    w: `charts/multibagger/${{sym}}_weekly.png`,
+    m: `charts/multibagger/${{sym}}_monthly.png`,
   }};
   document.getElementById('modalTitle').textContent = sym + ' — ' + tab + ' Chart';
   document.getElementById('chartModal').classList.add('open');
@@ -1494,6 +2734,208 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 </body>
 </html>"""
 
+
+# ── Historical Trades Report ──────────────────────────────────────────────────
+def build_trades_html(results, scan_time):
+    """Separate report: every historical BUY->SELL trade the signals would have
+    taken on each stock (from backtest()'s trade log), with entry/exit dates,
+    % return, and days held — so the daily/weekly/monthly signal combination
+    can be checked against its own trade-by-trade track record, not just a
+    single win-rate summary number.
+    """
+    all_trades = []
+    for r in results:
+        for t in r.get('trade_list', []):
+            all_trades.append({
+                'symbol': r['symbol'], 'name': r['name'],
+                'signal': t.get('signal', ''),
+                'entry_date': t['entry_date'], 'entry_price': t['entry_price'],
+                'exit_date': t['exit_date'], 'exit_price': t['exit_price'],
+                'return_pct': t['return_pct'], 'days_held': t['days_held'],
+                'open': bool(t.get('open', False)),
+            })
+
+    # Sort by exit date desc (most recent trades first)
+    all_trades.sort(key=lambda t: t['exit_date'], reverse=True)
+
+    total = len(all_trades)
+    closed = [t for t in all_trades if not t['open']]
+    open_trades = [t for t in all_trades if t['open']]
+    wins = [t for t in closed if t['return_pct'] > 0]
+    win_rate = (len(wins) / len(closed) * 100) if closed else 0
+    avg_ret = np.mean([t['return_pct'] for t in closed]) if closed else 0
+    avg_days = np.mean([t['days_held'] for t in closed]) if closed else 0
+    best = max(closed, key=lambda t: t['return_pct']) if closed else None
+    worst = min(closed, key=lambda t: t['return_pct']) if closed else None
+
+    rows_html = []
+    for i, t in enumerate(all_trades, 1):
+        ret = t['return_pct']
+        ret_color = '#00ff88' if ret > 0 else ('#ff6b6b' if ret < 0 else '#8b949e')
+        status_badge = ('<span style="color:#f0b429;font-weight:700;">● OPEN</span>' if t['open']
+                         else ('<span style="color:#00ff88;">✓ WIN</span>' if ret > 0
+                               else '<span style="color:#ff6b6b;">✗ LOSS</span>'))
+        rows_html.append(f"""
+<tr class="trade-row" data-status="{'open' if t['open'] else ('win' if ret>0 else 'loss')}" data-symbol="{t['symbol']}">
+  <td style="color:#555;font-size:11px;padding:6px 4px;">{i}</td>
+  <td style="padding:6px 8px;">
+    <div style="font-weight:700;color:#e6edf3;font-size:12px;">{t['symbol']}</div>
+    <div style="color:#8b949e;font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{t['name']}</div>
+  </td>
+  <td style="padding:6px 8px;">{sig_badge(t['signal'])}</td>
+  <td style="padding:6px 8px;color:#8b949e;font-size:11px;white-space:nowrap;">{t['entry_date'].strftime('%Y-%m-%d')}</td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:11px;">{fmt_price(t['entry_price'])}</td>
+  <td style="padding:6px 8px;color:#8b949e;font-size:11px;white-space:nowrap;">{t['exit_date'].strftime('%Y-%m-%d')}</td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:11px;">{fmt_price(t['exit_price'])}</td>
+  <td style="padding:6px 8px;color:#8b949e;font-size:11px;">{t['days_held']}</td>
+  <td style="padding:6px 8px;color:{ret_color};font-weight:700;font-size:12px;">{ret:+.1f}%</td>
+  <td style="padding:6px 8px;">{status_badge}</td>
+</tr>""")
+
+    rows = '\n'.join(rows_html)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📒 Multibagger Trades Report — Historical Buy/Sell Log</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh}}
+.header{{padding:20px 24px;border-bottom:1px solid #30363d;background:#161b22;}}
+.header h1{{font-size:20px;margin-bottom:4px;}}
+.header .meta{{color:#8b949e;font-size:12px;}}
+.stats{{display:flex;gap:16px;padding:16px 24px;flex-wrap:wrap;}}
+.stat-card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 18px;min-width:120px;}}
+.stat-card .label{{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;}}
+.stat-card .value{{font-size:22px;font-weight:700;margin-top:4px;}}
+.toolbar{{display:flex;gap:8px;padding:0 24px 16px;flex-wrap:wrap;align-items:center;}}
+#searchBox{{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
+            padding:7px 12px;font-size:13px;min-width:220px;font-family:inherit;}}
+.filter-btn{{background:#161b22;color:#8b949e;border:1px solid #30363d;border-radius:6px;
+             padding:6px 12px;font-size:12px;cursor:pointer;font-family:inherit;}}
+.filter-btn.active{{background:#1f6feb22;color:#58a6ff;border-color:#58a6ff;}}
+#countBadge{{color:#8b949e;font-size:12px;margin-left:auto;}}
+table{{width:100%;border-collapse:collapse;font-size:12px;}}
+thead th{{position:sticky;top:0;background:#161b22;color:#8b949e;text-align:left;
+          padding:8px;border-bottom:1px solid #30363d;cursor:pointer;user-select:none;
+          font-size:11px;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap;}}
+thead th:hover{{color:#e6edf3;}}
+tbody tr{{border-bottom:1px solid #21262d;}}
+tbody tr:hover{{background:#161b22;}}
+tbody tr.hidden{{display:none;}}
+.table-wrap{{padding:0 24px 32px;overflow-x:auto;}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📒 Multibagger Trades Report — Historical Buy → Sell Log</h1>
+  <div class="meta">Generated {scan_time} &nbsp;|&nbsp; Every BUY→SELL trade the daily signal
+    combination would have taken, from the main scan's backtest. Companion to the main
+    multibagger_report.html — use this to check a signal's actual trade-by-trade track
+    record rather than a single win-rate summary.</div>
+</div>
+
+<div class="stats">
+  <div class="stat-card"><div class="label">Total Trades</div><div class="value">{total:,}</div></div>
+  <div class="stat-card"><div class="label">Closed</div><div class="value">{len(closed):,}</div></div>
+  <div class="stat-card"><div class="label">Open Now</div><div class="value" style="color:#f0b429;">{len(open_trades):,}</div></div>
+  <div class="stat-card"><div class="label">Win Rate</div><div class="value" style="color:{'#00ff88' if win_rate>=50 else '#ff6b6b'};">{win_rate:.0f}%</div></div>
+  <div class="stat-card"><div class="label">Avg Return</div><div class="value" style="color:{'#00ff88' if avg_ret>=0 else '#ff6b6b'};">{avg_ret:+.1f}%</div></div>
+  <div class="stat-card"><div class="label">Avg Days Held</div><div class="value">{avg_days:.0f}</div></div>
+  <div class="stat-card"><div class="label">Best Trade</div><div class="value" style="color:#00ff88;font-size:16px;">{(best['symbol']+' '+f"{best['return_pct']:+.0f}%") if best else '—'}</div></div>
+  <div class="stat-card"><div class="label">Worst Trade</div><div class="value" style="color:#ff6b6b;font-size:16px;">{(worst['symbol']+' '+f"{worst['return_pct']:+.0f}%") if worst else '—'}</div></div>
+</div>
+
+<div class="toolbar">
+  <input type="text" id="searchBox" placeholder="🔍 Search symbol or name..." oninput="filterTrades()">
+  <button class="filter-btn" id="winBtn" onclick="toggleTradeFilter('win')">✓ Wins Only</button>
+  <button class="filter-btn" id="lossBtn" onclick="toggleTradeFilter('loss')">✗ Losses Only</button>
+  <button class="filter-btn" id="openBtn" onclick="toggleTradeFilter('open')">● Open Positions</button>
+  <button class="filter-btn" onclick="clearTradeFilters()" style="color:#26d07c;border-color:#26d07c;">Show All</button>
+  <span id="countBadge">{total:,} trades</span>
+</div>
+
+<div class="table-wrap">
+<table id="tradesTable">
+<thead>
+<tr>
+  <th>#</th>
+  <th onclick="sortTrades(1,'str')">Symbol</th>
+  <th onclick="sortTrades(2,'str')">Signal</th>
+  <th onclick="sortTrades(3,'str')">Entry Date</th>
+  <th onclick="sortTrades(4,'num')">Entry Price</th>
+  <th onclick="sortTrades(5,'str')">Exit Date</th>
+  <th onclick="sortTrades(6,'num')">Exit Price</th>
+  <th onclick="sortTrades(7,'num')">Days Held</th>
+  <th onclick="sortTrades(8,'num')">Return %</th>
+  <th onclick="sortTrades(9,'str')">Status</th>
+</tr>
+</thead>
+<tbody id="tradesBody">
+{rows}
+</tbody>
+</table>
+</div>
+
+<script>
+let tradeFilter = null;
+
+function filterTrades() {{
+  const q = document.getElementById('searchBox').value.toLowerCase();
+  const rows = document.querySelectorAll('#tradesBody .trade-row');
+  let vis = 0;
+  rows.forEach(r => {{
+    const matchSearch = !q || r.textContent.toLowerCase().includes(q);
+    let matchFilter = true;
+    if (tradeFilter === 'win')  matchFilter = r.dataset.status === 'win';
+    if (tradeFilter === 'loss') matchFilter = r.dataset.status === 'loss';
+    if (tradeFilter === 'open') matchFilter = r.dataset.status === 'open';
+    const show = matchSearch && matchFilter;
+    r.classList.toggle('hidden', !show);
+    if (show) vis++;
+  }});
+  document.getElementById('countBadge').textContent = vis.toLocaleString() + ' trades';
+}}
+
+function toggleTradeFilter(name) {{
+  tradeFilter = (tradeFilter === name) ? null : name;
+  ['winBtn','lossBtn','openBtn'].forEach(id => document.getElementById(id).classList.remove('active'));
+  const map = {{win:'winBtn', loss:'lossBtn', open:'openBtn'}};
+  if (tradeFilter) document.getElementById(map[tradeFilter]).classList.add('active');
+  filterTrades();
+}}
+
+function clearTradeFilters() {{
+  tradeFilter = null;
+  document.getElementById('searchBox').value = '';
+  ['winBtn','lossBtn','openBtn'].forEach(id => document.getElementById(id).classList.remove('active'));
+  filterTrades();
+}}
+
+let tSortCol = 8, tSortDir = -1;
+function sortTrades(col, type) {{
+  const tbody = document.getElementById('tradesBody');
+  const rows = Array.from(tbody.querySelectorAll('.trade-row'));
+  tSortDir = (tSortCol === col) ? -tSortDir : -1;
+  tSortCol = col;
+  rows.sort((a, b) => {{
+    let av = a.children[col].textContent.trim();
+    let bv = b.children[col].textContent.trim();
+    if (type === 'num') {{
+      av = parseFloat(av.replace(/[^0-9.\\-]/g, '')) || 0;
+      bv = parseFloat(bv.replace(/[^0-9.\\-]/g, '')) || 0;
+      return (av - bv) * tSortDir;
+    }}
+    return av.localeCompare(bv) * tSortDir;
+  }});
+  rows.forEach(r => tbody.appendChild(r));
+}}
+</script>
+</body>
+</html>"""
+
 # ── GitHub Push ───────────────────────────────────────────────────────────────
 def push_to_github():
     token = os.environ.get('GITHUB_TOKEN', '')
@@ -1504,7 +2946,7 @@ def push_to_github():
         env = {**os.environ,
                'GIT_AUTHOR_NAME': 'NSE Bot', 'GIT_AUTHOR_EMAIL': 'bot@noreply',
                'GIT_COMMITTER_NAME': 'NSE Bot', 'GIT_COMMITTER_EMAIL': 'bot@noreply'}
-        subprocess.run(['git', 'add', REPORT_HTML, str(CHARTS_DIR)],
+        subprocess.run(['git', 'add', REPORT_HTML, TRADES_REPORT_HTML, str(CHARTS_DIR)],
                        check=False, env=env, capture_output=True)
         subprocess.run(['git', 'add', '-A'], check=False, env=env, capture_output=True)
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -1530,6 +2972,26 @@ def push_to_github():
         tprint(f"  \u26a0\ufe0f  GitHub push error: {e}")
 
 # ── Progress Cache ───────────────────────────────────────────────────────────────
+def _json_default(obj):
+    """Fallback encoder for save_cache(). json.dump() only natively handles
+    str/int/float/bool/None/list/dict — this covers everything else that
+    actually shows up in a result dict: pandas Timestamps (from trade_list's
+    entry_date/exit_date), and numpy scalar types (int64/float64/bool_) that
+    can slip through if a value wasn't explicitly cast with int()/float().
+    """
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return None if np.isnan(obj) else float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def load_cache(today_str):
     """Load per-ticker result cache for today date.
     Returns dict {ticker: result_dict}.  Returns {} if stale or missing.
@@ -1540,6 +3002,16 @@ def load_cache(today_str):
                 data = json.load(f)
             if data.get('date') == today_str:
                 results = data.get('results', {})
+                # trade_list's entry_date/exit_date were serialized to ISO strings
+                # by _json_default() — restore them to Timestamps so downstream
+                # code (build_trades_html's .strftime(), date sorting) still works
+                # on cache-hit results exactly like freshly-computed ones.
+                for r in results.values():
+                    for t in (r.get('trade_list') or []):
+                        if isinstance(t.get('entry_date'), str):
+                            t['entry_date'] = pd.Timestamp(t['entry_date'])
+                        if isinstance(t.get('exit_date'), str):
+                            t['exit_date'] = pd.Timestamp(t['exit_date'])
                 tprint(f"  📂 Cache hit: {len(results)} stocks already processed today")
                 return results
             else:
@@ -1551,7 +3023,7 @@ def load_cache(today_str):
 def save_cache(cache):
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CACHE_FILE, 'w') as f:
-        json.dump(cache, f)
+        json.dump(cache, f, default=_json_default)
 
 # ── Main ──────────────────────────────────────────────────────────────────────────
 def main():
@@ -1573,7 +3045,7 @@ def main():
 
     # Cache partition
     cache_results = load_cache(today_str)
-    items = list(stocks.items())
+    items = stocks   # already a list of (name, ticker) tuples, ticker-uniqueness enforced in load_nse_stocks()
 
     items_cached   = []
     items_to_fetch = []
@@ -1651,20 +3123,23 @@ def main():
                f"in {dl_elapsed:.1f}s\n")
 
         # ── Phase 2: Compute Indicators + Charts ──────────────────────
+        # CPU-bound (pandas/numpy indicator math + matplotlib chart rendering), so this
+        # uses a ProcessPoolExecutor for real multi-core parallelism instead of threads
+        # (threads would be serialized by the GIL for this kind of work).
         tprint(f"  PHASE 2/2 - Computing indicators + signals + charts")
-        tprint(f"  Workers   : {MAX_WORKERS}  |  Stocks: {len(items_to_fetch):,}")
+        tprint(f"  Workers   : {COMPUTE_WORKERS} processes ({os.cpu_count()} CPU cores detected)  "
+               f"|  Stocks: {len(items_to_fetch):,}")
         tprint("-" * 65)
 
         t_cp_start  = time.time()
         cp_lock     = threading.Lock()
         blast_list  = []
 
-        def worker(args):
-            name, ticker = args
-            return name, ticker, process_stock(name, ticker, prefetched.get(ticker))
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
-            futures = {exe.submit(worker, item): item for item in items_to_fetch}
+        with ProcessPoolExecutor(max_workers=COMPUTE_WORKERS) as exe:
+            futures = {
+                exe.submit(_process_stock_task, (name, ticker, prefetched.get(ticker))): (name, ticker)
+                for name, ticker in items_to_fetch
+            }
 
             for fut in as_completed(futures):
                 done += 1
@@ -1714,6 +3189,34 @@ def main():
                f"Total={total_elapsed:.0f}s")
         tprint(f"{'='*65}\n")
 
+    # ── Cross-sectional RS Rating + Early Trend scoring ────────────────
+    # RS Rating needs every stock's raw score before it can rank any one of them
+    # (it's a percentile within today's universe), so this has to happen once,
+    # after Phase 2 is fully done — not inside process_stock(). Uses .get() with
+    # fallbacks throughout since same-day cached results from a run before this
+    # feature existed won't have these fields.
+    tprint("  Computing RS Ratings + Early Trend scores...")
+    rs_series = pd.Series({i: r['rs_raw'] for i, r in enumerate(results)
+                            if r.get('rs_raw') is not None})
+    if len(rs_series) >= 10:
+        rs_pctile = rs_series.rank(pct=True) * 98 + 1   # IBD-style 1-99 scale
+    else:
+        rs_pctile = pd.Series(dtype=float)
+
+    for i, r in enumerate(results):
+        rs_rating = round(float(rs_pctile[i]), 1) if i in rs_pctile.index else None
+        r['rs_rating'] = rs_rating
+        r['early_trend_score'] = compute_early_trend_score(
+            stage_num=r.get('stage_num', 0),
+            squeeze_recent=r.get('squeeze_recent', False),
+            vol_ratio=r.get('vol_ratio', 1.0),
+            d_rsi_val=r.get('d_rsi', 50),
+            adx_val=r.get('adx', 0),
+            rs_rating=rs_rating,
+        )
+        r['early_trend'] = (r['early_trend_score'] >= 55 and
+                             r.get('stage_num', 0) in (1, 2))
+
     # ── Build HTML report ─────────────────────────────────────────────
     tprint("  Building HTML report...")
     html = build_html(results, scan_time, total_scanned, ok_count)
@@ -1723,9 +3226,18 @@ def main():
     tprint(f"  Saved: {REPORT_HTML}  ({size_mb:.1f} MB)")
     tprint(f"  Stocks: {ok_count}  |  BLAST signals: {sum(1 for r in results if r.get('blast'))}")
 
+    # ── Build historical trades report ─────────────────────────────────
+    tprint("  Building historical trades report...")
+    trades_html = build_trades_html(results, scan_time)
+    with open(TRADES_REPORT_HTML, 'w', encoding='utf-8') as f:
+        f.write(trades_html)
+    trades_size_mb = Path(TRADES_REPORT_HTML).stat().st_size / 1024 / 1024
+    total_trade_count = sum(len(r.get('trade_list', [])) for r in results)
+    tprint(f"  Saved: {TRADES_REPORT_HTML}  ({trades_size_mb:.1f} MB, {total_trade_count:,} trades)")
+
     # ── GitHub Push ───────────────────────────────────────────────────
-   # tprint("\n  Pushing to GitHub...")
-   # push_to_github()
+    tprint("\n  Pushing to GitHub...")
+    push_to_github()
 
     save_cache({'date': today_str, 'done': total_scanned,
                 'total': total_scanned, 'results': cache_results})
