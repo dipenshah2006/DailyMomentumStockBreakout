@@ -120,6 +120,60 @@ def run_nse_report():
             job_running = False
 
 
+def run_asx_report():
+    """Run ASX RSI MTF screener (ASX/NSEScreener71.py) from workspace root."""
+    log.info('Starting ASX screener report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'ASX/NSEScreener71.py'],
+            capture_output=True, text=True, timeout=18000  # 5 hours — no hard limit on self-hosted
+        )
+        if result.returncode == 0:
+            log.info('ASX report completed successfully.')
+        else:
+            log.error(f'ASX report failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('ASX report timed out after 5 hours.')
+    except Exception as e:
+        log.error(f'ASX report error: {e}')
+
+
+def run_usa_report():
+    """Run USA/NYSE RSI MTF screener (USAs/NSEScreener7.py)."""
+    log.info('Starting USA/NYSE screener report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'USAs/NSEScreener7.py'],
+            capture_output=True, text=True, timeout=18000  # 5 hours
+        )
+        if result.returncode == 0:
+            log.info('USA report completed successfully.')
+        else:
+            log.error(f'USA report failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('USA report timed out after 5 hours.')
+    except Exception as e:
+        log.error(f'USA report error: {e}')
+
+
+def run_index_dashboard():
+    """Run NSE Index Dashboard (IndexDashBoard/realtime_analysis4.py)."""
+    log.info('Starting Index Dashboard report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'IndexDashBoard/realtime_analysis4.py', 'index_dashboard_config.json'],
+            capture_output=True, text=True, timeout=3600  # 1 hour — index-only, much faster
+        )
+        if result.returncode == 0:
+            log.info('Index Dashboard completed successfully.')
+        else:
+            log.error(f'Index Dashboard failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('Index Dashboard timed out after 1 hour.')
+    except Exception as e:
+        log.error(f'Index Dashboard error: {e}')
+
+
 def run_email_send(dry_run=False):
     global email_running, email_started_at, email_last_result
     with email_lock:
@@ -469,6 +523,57 @@ def fo():
             'Chande Kroll Stop · Volume Oscillator · Darvas Box · Bollinger Band · '
             'Donchian Channel · Trend Channel · S/R Levels · Fibonacci Extension &amp; Retracement (15-min)</p>'
             '<a href="/" style="color:#38bdf8;margin-top:20px;display:inline-block;">← Back to Full Report</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/asx')
+def asx():
+    path = 'asx_report_NSE.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">🦘 ASX Screener Report</h2>'
+            '<p style="color:#94a3b8;">No ASX report yet — will be generated during the next daily run.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/usa')
+def usa():
+    # USAs/NSEScreener7.py writes to its own SCRIPT_DIR, so look there first
+    path = os.path.join('USAs', 'rsi_mtf_report_NYSE.html')
+    if not os.path.exists(path):
+        path = 'rsi_mtf_report_NYSE.html'   # fallback: root-level output
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">🇺🇸 USA / NYSE Screener Report</h2>'
+            '<p style="color:#94a3b8;">No USA report yet — will be generated during the next daily run.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/index-dashboard')
+def index_dashboard():
+    path = 'index_analysis.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">📊 NSE Index Dashboard</h2>'
+            '<p style="color:#94a3b8;">No Index Dashboard yet — will be generated during the next daily run.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back</a>'
             '</body></html>',
             mimetype='text/html'
         )
@@ -936,12 +1041,15 @@ def _keep_alive():
 
 if __name__ == '__main__':
     scheduler = BackgroundScheduler(timezone=IST)
-    # Every day at 9:00 PM IST
-    scheduler.add_job(run_nse_report, 'cron', hour=21, minute=0)
-    # Ping every 10 min to keep the process alive so the cron always fires
+    # ── Daily reports — 9:00 PM IST ───────────────────────────────────────────
+    scheduler.add_job(run_nse_report,       'cron', hour=21, minute=0)   # NSE RSI MTF
+    scheduler.add_job(run_index_dashboard,  'cron', hour=21, minute=5)   # NSE Index Dashboard
+    scheduler.add_job(run_asx_report,       'cron', hour=21, minute=15)  # ASX screener
+    scheduler.add_job(run_usa_report,       'cron', hour=21, minute=30)  # USA/NYSE screener
+    # ── Keep-alive ping — every 10 min ────────────────────────────────────────
     scheduler.add_job(_keep_alive, 'interval', minutes=10)
     scheduler.start()
-    log.info('Scheduler started — NSE report will run every day at 9:00 PM IST.')
+    log.info('Scheduler started — NSE/Index/ASX/USA reports scheduled from 9:00 PM IST daily.')
 
     if not latest_report():
         log.info('No existing report found — generating first report now...')
