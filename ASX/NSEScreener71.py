@@ -45,8 +45,8 @@ LOCAL_FO_CSV        = "india/NSE/nse_fo_list.csv"   # NSE F&O securities list
 
 # ASX (Australian Securities Exchange) stocks
 # CSV columns expected: "ACT Symbol", "Company name", "GICS industry group"
-LOCAL_ASX_CSV       = r"C:\python\cursorYfinance\newMomentum\ASX\nyse-listed.csv"
-ASX_CHART_OUTPUT_DIR = r"C:\python\cursorYfinance\newMomentum\ASX\charts"  # local folder for ASX chart PNGs
+LOCAL_ASX_CSV       = "ASX/nyse-listed.csv"
+ASX_CHART_OUTPUT_DIR = "charts/asx"            # folder for ASX chart PNGs
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
@@ -160,9 +160,9 @@ RUN_TS      = datetime.now().strftime("%d %b %Y  %H:%M")
 _STAMP      = datetime.now().strftime("%d%m%Y_%H%M")
 START_TS    = RUN_TS
 START_TIME  = time.time()
-OUTPUT_HTML = "rsi_mtf_report_NSE.html"   # fixed name — always overwrites, no duplicates
+OUTPUT_HTML = "asx_report_NSE.html"        # fixed name — avoids conflict with main NSE report
 ERROR_LOG   = f"error_log_{_STAMP}.txt"   # timestamped so each run's errors are separate
-CACHE_FILE  = "stock_data_cache.pkl"
+CACHE_FILE  = "asx_stock_cache.pkl"
 CHART_CACHE_META = os.path.join(CHART_OUTPUT_DIR, "chart_cache.json")
 
 # ═════════════════════════════════════════════════════════════════════════════
