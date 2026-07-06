@@ -236,14 +236,161 @@ jobs:
           if-no-files-found: warn
 
   # ════════════════════════════════════════════════════════════════
-  #  5. Deploy & Send Emails
-  #     Runs after all 4 report jobs — whether they pass or fail.
+  #  5. NSE Index Dashboard (Plotly — indices only, fast)
+  # ════════════════════════════════════════════════════════════════
+  index-dashboard:
+    name: NSE Index Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
+            "plotly>=5.18.0" "requests>=2.31.0" "openpyxl>=3.1.0" \
+            "kaleido>=0.2.1"
+
+      - name: Create directories
+        run: mkdir -p india/NSE/NSECash india/NSE/NseIndice IndexDashBoard/cache charts/index
+
+      - name: Download NSE equity list
+        run: |
+          curl -sL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Referer: https://www.nseindia.com/" \
+            --retry 3 --retry-delay 5 --max-time 30 \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
+          || echo "⚠️  NSE CSV blocked — using built-in ticker list"
+
+      - name: Run Index Dashboard
+        id: run
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python IndexDashBoard/realtime_analysis4.py index_dashboard_config.json
+
+      - name: Upload Index Dashboard HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: index-dashboard-html
+          path: |
+            index_analysis.html
+            charts/index/
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ════════════════════════════════════════════════════════════════
+  #  6. ASX Screener — self-hosted runner (no timeout limit)
+  #     Scans NSE + ASX stocks; can take several hours.
+  # ════════════════════════════════════════════════════════════════
+  asx-report:
+    name: ASX Screener
+    runs-on: self-hosted
+    # No timeout-minutes — self-hosted runners have no GitHub-imposed limit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
+            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+
+      - name: Create directories
+        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/asx
+
+      - name: Download NSE equity list
+        run: |
+          curl -sL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Referer: https://www.nseindia.com/" \
+            --retry 3 --retry-delay 5 --max-time 30 \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
+          || echo "⚠️  NSE CSV blocked — using built-in ticker list"
+
+      - name: Run ASX Screener
+        id: run
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python ASX/NSEScreener71.py
+
+      - name: Upload ASX HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asx-html
+          path: asx_report_NSE.html
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ════════════════════════════════════════════════════════════════
+  #  7. USA / NYSE Screener — self-hosted runner (no timeout limit)
+  #     Scans NYSE stocks; can take several hours.
+  # ════════════════════════════════════════════════════════════════
+  usa-report:
+    name: USA / NYSE Screener
+    runs-on: self-hosted
+    # No timeout-minutes — self-hosted runners have no GitHub-imposed limit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
+            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+
+      - name: Create directories
+        run: mkdir -p USAs/charts
+
+      - name: Run USA / NYSE Screener
+        id: run
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python USAs/NSEScreener7.py
+
+      - name: Upload USA HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usa-html
+          path: USAs/rsi_mtf_report_NYSE.html
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ════════════════════════════════════════════════════════════════
+  #  8. Deploy & Send Emails
+  #     Runs after ALL 7 report jobs — whether they pass or fail.
   #     Publishes whatever HTML was generated to GitHub Pages,
   #     then sends the appropriate emails.
   # ════════════════════════════════════════════════════════════════
   deploy:
     name: Deploy & Email
-    needs: [rsi-report, ath-report, rocket-report, fo-report]
+    needs: [rsi-report, ath-report, rocket-report, fo-report, index-dashboard, asx-report, usa-report]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -299,6 +446,27 @@ jobs:
           path: .
         continue-on-error: true
 
+      - name: Download Index Dashboard HTML
+        uses: actions/download-artifact@v4
+        with:
+          name: index-dashboard-html
+          path: .
+        continue-on-error: true
+
+      - name: Download ASX HTML
+        uses: actions/download-artifact@v4
+        with:
+          name: asx-html
+          path: .
+        continue-on-error: true
+
+      - name: Download USA HTML
+        uses: actions/download-artifact@v4
+        with:
+          name: usa-html
+          path: USAs
+        continue-on-error: true
+
       - name: Prepare GitHub Pages output
         run: |
           mkdir -p _site
@@ -318,12 +486,15 @@ jobs:
             fi
           fi
 
-          [ -f "ath_report_NSE.html"    ] && cp ath_report_NSE.html    _site/ath.html       && echo "✅ ATH"    || echo "⚠️  ATH not found"
-          [ -f "rocket_scan_latest.html"] && cp rocket_scan_latest.html _site/rocket.html    && echo "✅ Rocket" || echo "⚠️  Rocket not found"
-          [ -f "fo_report.html"         ] && cp fo_report.html          _site/fo.html        && echo "✅ F&O"    || echo "⚠️  F&O not found"
+          [ -f "ath_report_NSE.html"    ] && cp ath_report_NSE.html    _site/ath.html            && echo "✅ ATH"             || echo "⚠️  ATH not found"
+          [ -f "rocket_scan_latest.html"] && cp rocket_scan_latest.html _site/rocket.html         && echo "✅ Rocket"          || echo "⚠️  Rocket not found"
+          [ -f "fo_report.html"         ] && cp fo_report.html          _site/fo.html             && echo "✅ F&O"             || echo "⚠️  F&O not found"
+          [ -f "index_analysis.html"    ] && cp index_analysis.html     _site/index-dashboard.html && echo "✅ Index Dashboard" || echo "⚠️  Index Dashboard not found"
+          [ -f "asx_report_NSE.html"    ] && cp asx_report_NSE.html     _site/asx.html            && echo "✅ ASX"             || echo "⚠️  ASX not found"
+          [ -f "USAs/rsi_mtf_report_NYSE.html" ] && cp USAs/rsi_mtf_report_NYSE.html _site/usa.html && echo "✅ USA/NYSE"      || echo "⚠️  USA/NYSE not found"
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
-          [ -f "multibagger_report.html"] && cp multibagger_report.html _site/multibagger.html && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
+          [ -f "multibagger_report.html"] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
 
           ls -lh _site/
 
@@ -411,6 +582,66 @@ jobs:
           fi
           DATE=$(date +'%d %b %Y')
           echo "🏆 NSE ATH Breakout Report — ${DATE}" > ath_subject.txt
+          python send_report_email.py
+
+      - name: Send Index Dashboard email
+        if: needs.index-dashboard.result == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS:   ${{ github.event.inputs.email_list }}
+          EMAIL_SEND_MODE:    ${{ github.event.inputs.send_mode || 'bcc' }}
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    index_analysis.html
+          EMAIL_SUBJECT_FILE: index_dashboard_subject.txt
+        run: |
+          if [ ! -f index_analysis.html ]; then
+            echo "⚠️  index_analysis.html not found — skipping"
+            exit 0
+          fi
+          DATE=$(date +'%d %b %Y')
+          echo "📊 NSE Index Dashboard — ${DATE}" > index_dashboard_subject.txt
+          python send_report_email.py
+
+      - name: Send ASX Screener email
+        if: needs.asx-report.result == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS:   ${{ github.event.inputs.email_list }}
+          EMAIL_SEND_MODE:    ${{ github.event.inputs.send_mode || 'bcc' }}
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    asx_report_NSE.html
+          EMAIL_SUBJECT_FILE: asx_subject.txt
+        run: |
+          if [ ! -f asx_report_NSE.html ]; then
+            echo "⚠️  asx_report_NSE.html not found — skipping"
+            exit 0
+          fi
+          DATE=$(date +'%d %b %Y')
+          echo "🦘 ASX Screener Report — ${DATE}" > asx_subject.txt
+          python send_report_email.py
+
+      - name: Send USA / NYSE Screener email
+        if: needs.usa-report.result == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS:   ${{ github.event.inputs.email_list }}
+          EMAIL_SEND_MODE:    ${{ github.event.inputs.send_mode || 'bcc' }}
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    USAs/rsi_mtf_report_NYSE.html
+          EMAIL_SUBJECT_FILE: usa_subject.txt
+        run: |
+          if [ ! -f USAs/rsi_mtf_report_NYSE.html ]; then
+            echo "⚠️  USAs/rsi_mtf_report_NYSE.html not found — skipping"
+            exit 0
+          fi
+          DATE=$(date +'%d %b %Y')
+          echo "🇺🇸 USA / NYSE Screener Report — ${DATE}" > usa_subject.txt
           python send_report_email.py
 
       - name: Generate and send Weekly Digest (Sat & Sun only)
