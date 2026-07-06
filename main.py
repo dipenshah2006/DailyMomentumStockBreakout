@@ -18,7 +18,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SESSION_SECRET', 'nse-dashboard-secret')
+_session_secret = os.environ.get('SESSION_SECRET')
+if not _session_secret:
+    raise RuntimeError("SESSION_SECRET environment variable is not set. "
+                       "Add it as a Replit Secret before starting the app.")
+app.secret_key = _session_secret
 
 SCRIPT = 'rsi_mtf_report_nse.py'
 IST = pytz.timezone('Asia/Kolkata')
