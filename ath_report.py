@@ -31,6 +31,56 @@ CACHE_FILE      = "ath_cache.pkl"
 USE_CACHE       = True
 CACHE_MAX_AGE_H = 6           # hours before cache expires
 
+# Shared RSI cache (stock_data_cache.pkl) — loaded once, reused by all analyse() calls.
+# If present, DataFrame lookups skip yfinance entirely for cached tickers.
+RSI_CACHE_FILE = "stock_data_cache.pkl"
+_RSI_CACHE: dict = {}   # populated by _preload_rsi_cache() in fetch_all()
+
+
+def _preload_rsi_cache() -> int:
+    """Load stock_data_cache.pkl into memory once. Returns number of tickers loaded."""
+    global _RSI_CACHE
+    if _RSI_CACHE:
+        return len(_RSI_CACHE)
+    if not os.path.exists(RSI_CACHE_FILE):
+        return 0
+    try:
+        with open(RSI_CACHE_FILE, "rb") as fh:
+            raw = pickle.load(fh)
+        if isinstance(raw, dict):
+            _RSI_CACHE = raw
+            n = sum(1 for k in raw if not k.startswith("__"))
+            print(f"  [ATH] RSI cache loaded: {n} tickers available — skipping yfinance for those stocks.")
+            return n
+    except Exception as e:
+        print(f"  [ATH] RSI cache load failed ({e}) — will download fresh data.")
+    return 0
+
+
+def _df_from_rsi_cache(yf_sym: str):
+    """Return a clean OHLCV DataFrame from the shared RSI cache, or None.
+
+    RSI cache keys are plain symbols (e.g. 'RELIANCE'), not 'RELIANCE.NS'.
+    We strip the .NS suffix before the lookup so the key matches correctly.
+    """
+    # RSI cache uses plain symbol keys (no .NS suffix)
+    plain = yf_sym[:-3] if yf_sym.endswith(".NS") else yf_sym
+    entry = _RSI_CACHE.get(plain) or _RSI_CACHE.get(yf_sym)   # try plain first, then as-is
+    if isinstance(entry, dict):
+        df = entry.get("df")
+    elif hasattr(entry, "empty"):
+        df = entry
+    else:
+        return None
+    if df is None or df.empty or len(df) < 20:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.droplevel(1, axis=1)
+    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    if "Close" not in cols:
+        return None
+    return df[cols].dropna()
+
 IST_OFFSET = "+05:30"
 
 # ── Stock List Loader ─────────────────────────────────────────────────────────
@@ -113,16 +163,19 @@ def analyse(symbol, name, cache):
         return cache[yf_sym]
 
     try:
-        end   = datetime.today()
-        start = end - timedelta(days=DATA_YEARS * 365 + 60)
-        df = yf.download(
-            yf_sym,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            progress=False, auto_adjust=True
-        )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        # Try RSI cache first — avoids a yfinance call for every cached ticker
+        df = _df_from_rsi_cache(yf_sym)
+        if df is None:
+            end   = datetime.today()
+            start = end - timedelta(days=DATA_YEARS * 365 + 60)
+            df = yf.download(
+                yf_sym,
+                start=start.strftime("%Y-%m-%d"),
+                end=end.strftime("%Y-%m-%d"),
+                progress=False, auto_adjust=True
+            )
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
         if df.empty or len(df) < 20:
             return None
@@ -231,6 +284,7 @@ def analyse(symbol, name, cache):
 # ── Batch downloader ──────────────────────────────────────────────────────────
 def fetch_all(tickers):
     cache = load_cache()
+    _preload_rsi_cache()   # load shared RSI cache once before threads start (thread-safe read-only after this)
     results = []
     total = len(tickers)
     done  = 0

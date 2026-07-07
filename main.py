@@ -157,8 +157,20 @@ def run_usa_report():
 
 
 def run_index_dashboard():
-    """Run NSE Index Dashboard (IndexDashBoard/realtime_analysis4.py)."""
-    log.info('Starting Index Dashboard report…')
+    """Run NSE Index Dashboard (IndexDashBoard/realtime_analysis4.py).
+    Seeds the per-ticker cache from the RSI MTF cache first so the dashboard
+    skips re-downloading stocks that are already cached.
+    """
+    log.info('Starting Index Dashboard — seeding cache from RSI MTF cache…')
+    try:
+        subprocess.run(
+            [sys.executable, 'seed_shared_cache.py'],
+            capture_output=True, text=True, timeout=120
+        )
+    except Exception as e:
+        log.warning(f'Cache seed step failed (non-fatal): {e}')
+
+    log.info('Running Index Dashboard report…')
     try:
         result = subprocess.run(
             [sys.executable, 'IndexDashBoard/realtime_analysis4.py', 'index_dashboard_config.json'],

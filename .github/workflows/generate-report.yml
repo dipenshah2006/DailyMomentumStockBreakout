@@ -138,6 +138,16 @@ jobs:
           pip install --upgrade pip
           pip install "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0"
 
+      # Restore RSI cache (if available) so ath_report.py can reuse cached DataFrames.
+      # If the cache is absent, ath_report.py falls back to yfinance automatically.
+      - name: Restore RSI data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-rsi-${{ runner.os }}-${{ hashFiles('rsi_mtf_report_nse.py') }}
+          restore-keys: stock-cache-rsi-${{ runner.os }}-
+        continue-on-error: true
+
       - name: Run ATH Breakout Report
         id: run
         env:
@@ -177,6 +187,25 @@ jobs:
           pip install \
             "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
             "matplotlib>=3.7.0" "requests>=2.31.0"
+
+      # Restore RSI cache and seed rocket_cache.pkl from it.
+      # If the RSI cache is absent, seed_shared_cache.py exits cleanly and
+      # rocket_scanner.py falls back to its own cache / fresh yfinance downloads.
+      - name: Restore RSI data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-rsi-${{ runner.os }}-${{ hashFiles('rsi_mtf_report_nse.py') }}
+          restore-keys: stock-cache-rsi-${{ runner.os }}-
+        continue-on-error: true
+
+      - name: Seed Rocket cache from RSI cache
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python seed_shared_cache.py \
+            && echo "✅ Rocket cache seeded" \
+            || echo "⚠️  Seed failed — Rocket Scanner will download fresh data"
 
       - name: Run Rocket Scanner
         id: run
@@ -218,6 +247,17 @@ jobs:
           pip install \
             "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
             "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+
+      # F&O Scanner natively reads stock_data_cache.pkl (same v2 format as RSI MTF).
+      # Restoring it here means F&O skips downloading tickers already cached by RSI.
+      # If the cache is absent, fo_scanner_report.py downloads fresh data on its own.
+      - name: Restore RSI data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-rsi-${{ runner.os }}-${{ hashFiles('rsi_mtf_report_nse.py') }}
+          restore-keys: stock-cache-rsi-${{ runner.os }}-
+        continue-on-error: true
 
       - name: Run F&O Scanner
         id: run
@@ -262,7 +302,7 @@ jobs:
             "kaleido>=0.2.1"
 
       - name: Create directories
-        run: mkdir -p india/NSE/NSECash india/NSE/NseIndice IndexDashBoard/cache charts/index
+        run: mkdir -p india/NSE/NSECash india/NSE/NseIndice india/NSE/cache IndexDashBoard/cache charts/index
 
       - name: Download NSE equity list
         run: |
@@ -274,6 +314,25 @@ jobs:
             -o india/NSE/NSECash/EQUITY_L.csv \
           && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
           || echo "⚠️  NSE CSV blocked — using built-in ticker list"
+
+      # Restore RSI cache and seed per-ticker files for the Index Dashboard.
+      # If the RSI cache is absent, seed_shared_cache.py exits cleanly and
+      # realtime_analysis4.py falls back to fresh yfinance downloads.
+      - name: Restore RSI data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-rsi-${{ runner.os }}-${{ hashFiles('rsi_mtf_report_nse.py') }}
+          restore-keys: stock-cache-rsi-${{ runner.os }}-
+        continue-on-error: true
+
+      - name: Seed index cache from RSI cache
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python seed_shared_cache.py \
+            && echo "✅ Cache seed done" \
+            || echo "⚠️  Cache seed failed — dashboard will download fresh data"
 
       - name: Run Index Dashboard
         id: run
