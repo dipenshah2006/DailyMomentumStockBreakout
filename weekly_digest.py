@@ -138,7 +138,7 @@ def analyse(sym: str, name: str, fo: bool) -> dict | None:
         # EMAs
         ema20  = float(close.ewm(span=20,  adjust=False).mean().iloc[-1])
         ema50  = float(close.ewm(span=50,  adjust=False).mean().iloc[-1])
-        ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1]) if len(df) >= 50 else ema50
+        ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1]) if len(df) >= 200 else ema50
 
         uptrend = last > ema20 > ema50 > ema200
 
@@ -218,7 +218,15 @@ def _week_badge(v):
             f'border-radius:8px;padding:1px 8px;font-size:11px;font-weight:700">'
             f'{sym} {abs(v):.1f}%</span>')
 
-def stock_row(r: dict, rank: int, show_ath=False) -> str:
+TD = "padding:9px 8px;border-bottom:1px solid #21262d;vertical-align:middle"
+
+def stock_row(r: dict, rank: int, show_ath=False, col7_val=None) -> str:
+    """Render one table row.
+
+    col7_val overrides the default column-7 content (used by volume section
+    to show vol_ratio instead of ath_price).  When None and show_ath=False,
+    falls back to ath_price.
+    """
     fo_tag = ('<span style="color:#00d4ff;font-size:9px;font-weight:700;'
               'border:1px solid #00d4ff44;border-radius:5px;padding:0 4px">F&O</span> '
               if r["fo"] else "")
@@ -232,17 +240,24 @@ def stock_row(r: dict, rank: int, show_ath=False) -> str:
             ath_tag = (f'<span style="color:{clr};font-size:11px;font-weight:700">'
                        f'{r["ath_pct"]:+.1f}%</span>')
 
+    if show_ath:
+        c7 = ath_tag
+    elif col7_val is not None:
+        c7 = col7_val
+    else:
+        c7 = _inr(r["ath_price"])
+
     return f'''<tr>
-  <td style="color:#8b949e;text-align:center;font-size:11px">{rank}</td>
-  <td>
+  <td style="{TD};color:#8b949e;text-align:center;font-size:11px">{rank}</td>
+  <td style="{TD}">
     {fo_tag}<b style="color:#e6edf3">{r['sym']}</b>&nbsp;
     {'<span style="font-size:9px;color:#8b949e">'+r['name']+'</span>' if r['name'] != r['sym'] else ''}
   </td>
-  <td style="text-align:right;font-weight:700">{_inr(r['last'])}</td>
-  <td style="text-align:center">{_week_badge(r['week_ret'])}</td>
-  <td style="text-align:right;color:{_rsi_clr(r['rsi_d'])};font-weight:700">{r['rsi_d'] if r['rsi_d'] else "—"}</td>
-  <td style="text-align:right;color:{_rsi_clr(r['rsi_w'])}">{r['rsi_w'] if r['rsi_w'] else "—"}</td>
-  <td style="text-align:center">{ath_tag if show_ath else _inr(r['ath_price'])}</td>
+  <td style="{TD};text-align:right;font-weight:700">{_inr(r['last'])}</td>
+  <td style="{TD};text-align:center">{_week_badge(r['week_ret'])}</td>
+  <td style="{TD};text-align:right;color:{_rsi_clr(r['rsi_d'])};font-weight:700">{r['rsi_d'] if r['rsi_d'] else "—"}</td>
+  <td style="{TD};text-align:right;color:{_rsi_clr(r['rsi_w'])}">{r['rsi_w'] if r['rsi_w'] else "—"}</td>
+  <td style="{TD};text-align:center">{c7}</td>
 </tr>'''
 
 
@@ -289,9 +304,10 @@ def build_html(results: list[dict]) -> str:
     breadth_pct = round(n_up / max(1, n_total) * 100)
 
     # 1. ATH section — AT ATH first, then closest
+    # Key: (1 for ATH stocks, 0 for near-ATH) then ath_pct descending — reverse=True puts highest key first
     ath_picks = sorted(
         [r for r in results if r["ath_pct"] >= -10],
-        key=lambda x: (-1 if x["is_ath"] else 0, x["ath_pct"]),
+        key=lambda x: (1 if x["is_ath"] else 0, x["ath_pct"]),
         reverse=True
     )[:TOP_N]
 
@@ -316,15 +332,16 @@ def build_html(results: list[dict]) -> str:
         reverse=True
     )[:TOP_N]
 
-    ath_rows     = "\n".join(stock_row(r, i+1, show_ath=True) for i, r in enumerate(ath_picks))
-    rsi_rows     = "\n".join(stock_row(r, i+1, show_ath=False) for i, r in enumerate(rsi_picks))
-    gainer_rows  = "\n".join(stock_row(r, i+1, show_ath=False) for i, r in enumerate(gainer_picks))
-    vol_rows     = "\n".join(stock_row(r, i+1, show_ath=False) for i, r in enumerate(vol_picks))
-
-    td_style = "padding:9px 8px;border-bottom:1px solid #21262d;vertical-align:middle"
-    # inject td style into rows
-    for var in ("ath_rows", "rsi_rows", "gainer_rows", "vol_rows"):
-        exec(f'{var} = {var}.replace("<td", "<td style=\\"{td_style}\\"", )', globals())
+    ath_rows    = "\n".join(stock_row(r, i+1, show_ath=True)  for i, r in enumerate(ath_picks))
+    rsi_rows    = "\n".join(stock_row(r, i+1, show_ath=False) for i, r in enumerate(rsi_picks))
+    gainer_rows = "\n".join(stock_row(r, i+1, show_ath=False) for i, r in enumerate(gainer_picks))
+    # Volume section: col 7 shows the actual vol_ratio value, not ath_price
+    vol_rows    = "\n".join(
+        stock_row(r, i+1, show_ath=False,
+                  col7_val=f'<b style="color:#fb923c">{r["vol_ratio"]}x</b>'
+                           if r["vol_ratio"] else "—")
+        for i, r in enumerate(vol_picks)
+    )
 
     ath_section    = section_table("ATH Breakout — Top Picks",     "🏆", ath_rows,    "vs ATH",    f"{PAGES_BASE}/ath.html",        "#00ff88")
     rsi_section    = section_table("RSI Momentum — Strong Setups", "📈", rsi_rows,    "ATH ₹",     f"{PAGES_BASE}/",                "#00d4ff")

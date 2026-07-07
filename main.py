@@ -609,6 +609,22 @@ def intraday():
         return Response(f.read(), mimetype='text/html')
 
 
+@app.route('/weekly-digest')
+def weekly_digest():
+    path = 'weekly_digest.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">📊 NSE Weekly Market Digest</h2>'
+            '<p style="color:#94a3b8;">No weekly digest yet — generated every Saturday at 5:00 AM IST via GitHub Actions.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back to Full Report</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
 @app.route('/sub-count')
 def sub_count():
     return jsonify({'count': len(_read_recipients())})
