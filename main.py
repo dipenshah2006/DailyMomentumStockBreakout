@@ -156,6 +156,33 @@ def run_usa_report():
         log.error(f'USA report error: {e}')
 
 
+def run_rocket_scanner():
+    """Run Rocket Scanner (rocket_scanner.py). Seeds cache from RSI MTF cache first."""
+    log.info('Starting Rocket Scanner — seeding cache from RSI MTF cache…')
+    try:
+        subprocess.run(
+            [sys.executable, 'seed_shared_cache.py'],
+            capture_output=True, text=True, timeout=120
+        )
+    except Exception as e:
+        log.warning(f'Rocket cache seed step failed (non-fatal): {e}')
+
+    log.info('Running Rocket Scanner report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'rocket_scanner.py'],
+            capture_output=True, text=True, timeout=7200  # 2 hours — 2000+ stocks
+        )
+        if result.returncode == 0:
+            log.info('Rocket Scanner completed successfully.')
+        else:
+            log.error(f'Rocket Scanner failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('Rocket Scanner timed out after 2 hours.')
+    except Exception as e:
+        log.error(f'Rocket Scanner error: {e}')
+
+
 def run_index_dashboard():
     """Run NSE Index Dashboard (IndexDashBoard/realtime_analysis4.py).
     Seeds the per-ticker cache from the RSI MTF cache first so the dashboard
@@ -1074,10 +1101,11 @@ if __name__ == '__main__':
     scheduler.add_job(run_index_dashboard,  'cron', hour=21, minute=5)   # NSE Index Dashboard
     scheduler.add_job(run_asx_report,       'cron', hour=21, minute=15)  # ASX screener
     scheduler.add_job(run_usa_report,       'cron', hour=21, minute=30)  # USA/NYSE screener
+    scheduler.add_job(run_rocket_scanner,   'cron', hour=21, minute=45)  # Rocket Scanner
     # ── Keep-alive ping — every 10 min ────────────────────────────────────────
     scheduler.add_job(_keep_alive, 'interval', minutes=10)
     scheduler.start()
-    log.info('Scheduler started — NSE/Index/ASX/USA reports scheduled from 9:00 PM IST daily.')
+    log.info('Scheduler started — NSE/Index/ASX/USA/Rocket reports scheduled from 9:00 PM IST daily.')
 
     if not latest_report():
         log.info('No existing report found — generating first report now...')
