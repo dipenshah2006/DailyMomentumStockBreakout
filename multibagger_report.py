@@ -63,6 +63,39 @@ MIN_DAILY_BARS = 10            # accept stocks with as few as 10 trading days (n
 COMPUTE_WORKERS = max(1, os.cpu_count() or 4)
 
 NSE_CASH_CSV   = Path("india/NSE/NSECash/EQUITY_L.csv")
+
+# ── Shared RSI-MTF cache (stock_data_cache.pkl) ──────────────────────────────
+# Loaded once at startup so fetch_data() can skip yfinance for stocks already
+# downloaded by rsi_mtf_report_nse.py (saves bandwidth + prevents OOM kills).
+_SHARED_CACHE: dict = {}
+
+def _load_shared_cache():
+    global _SHARED_CACHE
+    pkl = Path("stock_data_cache.pkl")
+    if not pkl.exists():
+        return
+    age_h = (time.time() - pkl.stat().st_mtime) / 3600
+    if age_h > 23:
+        return  # stale — don't use yesterday's data
+    try:
+        import pickle as _pkl
+        with open(pkl, "rb") as fh:
+            raw = _pkl.load(fh)
+        if not isinstance(raw, dict):
+            return
+        for sym, entry in raw.items():
+            if sym.startswith("__"):
+                continue
+            if isinstance(entry, dict):
+                df = entry.get("df")
+            elif hasattr(entry, "empty"):
+                df = entry
+            else:
+                continue
+            if df is not None and not df.empty:
+                _SHARED_CACHE[sym] = df
+    except Exception:
+        pass
 NSE_SME_CSV    = Path("india/NSE/NSESME/MW-SME-05-May-2026.csv")
 
 # Strategy thresholds
@@ -993,47 +1026,64 @@ def pick_primary_pattern(patterns):
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 def fetch_data(ticker):
-    """Single-ticker full-history download. Returns OHLCV DataFrame or None."""
-    import yfinance as yf
-    try:
-        df = yf.download(
-            ticker,
-            period='max',
-            progress=False, auto_adjust=True, actions=False
-        )
-        if df is None or df.empty or len(df) < MIN_DAILY_BARS:
-            return None
-        df.index = pd.to_datetime(df.index)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # Guard against duplicate column names — yfinance occasionally returns
-        # these for certain tickers. A duplicate name makes df['Close'] return
-        # a DataFrame instead of a Series, which then silently corrupts every
-        # downstream indicator calculation until a later assignment finally
-        # raises "Cannot set a DataFrame with multiple columns to the single
-        # column EMA9" (or whichever indicator happens to hit it first) — a
-        # confusing error far from the actual cause. Dedupe right here instead.
-        if df.columns.duplicated().any():
-            df = df.loc[:, ~df.columns.duplicated(keep='first')]
-
+    """Single-ticker full-history download. Returns OHLCV DataFrame or None.
+    Checks shared RSI-MTF cache first to avoid redundant yfinance calls."""
+    # ── Shared cache lookup ───────────────────────────────────────────────────
+    sym = ticker.replace('.NS', '').replace('.BO', '')
+    if sym in _SHARED_CACHE:
+        df = _SHARED_CACHE[sym].copy()
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(c in df.columns for c in required):
-            return None
-        df = df[required].copy()
+        if all(c in df.columns for c in required) and len(df) >= MIN_DAILY_BARS:
+            df = df[required].dropna()
+            return df if not df.empty else None
 
-        # Belt-and-suspenders: confirm every required column really is 1-D
-        # (a Series) before handing this off to the indicator pipeline.
-        if any(isinstance(df[c], pd.DataFrame) for c in required):
-            return None
+    import yfinance as yf
+    for attempt in range(3):
+        try:
+            df = yf.download(
+                ticker,
+                period='max',
+                progress=False, auto_adjust=True, actions=False,
+                timeout=15
+            )
+            if df is None or df.empty or len(df) < MIN_DAILY_BARS:
+                return None
+            df.index = pd.to_datetime(df.index)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-        df.dropna(inplace=True)
-        return df
-    except Exception:
-        return None
+            # Guard against duplicate column names — yfinance occasionally returns
+            # these for certain tickers. A duplicate name makes df['Close'] return
+            # a DataFrame instead of a Series, which then silently corrupts every
+            # downstream indicator calculation until a later assignment finally
+            # raises "Cannot set a DataFrame with multiple columns to the single
+            # column EMA9" (or whichever indicator happens to hit it first) — a
+            # confusing error far from the actual cause. Dedupe right here instead.
+            if df.columns.duplicated().any():
+                df = df.loc[:, ~df.columns.duplicated(keep='first')]
+
+            required = ['Open', 'High', 'Low', 'Close', 'Volume']
+            if not all(c in df.columns for c in required):
+                return None
+            df = df[required].copy()
+
+            # Belt-and-suspenders: confirm every required column really is 1-D
+            # (a Series) before handing this off to the indicator pipeline.
+            if any(isinstance(df[c], pd.DataFrame) for c in required):
+                return None
+
+            df.dropna(inplace=True)
+            return df
+        except Exception as e:
+            err = str(e)
+            if 'Rate' in err or 'rate' in err or '429' in err or 'Too Many' in err:
+                time.sleep(5 * (attempt + 1))  # back-off: 5s, 10s, 15s
+            else:
+                return None
+    return None
 
 
-def batch_fetch(tickers, max_workers=30):
+def batch_fetch(tickers, max_workers=5):
     """Download full OHLCV history for multiple tickers in parallel.
     Uses individual fetch_data() calls via ThreadPoolExecutor — reliable for
     period='max' which yfinance batch-download handles inconsistently.
@@ -3029,6 +3079,9 @@ def save_cache(cache):
 def main():
     t_start = time.time()
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+    tprint("  Loading shared RSI-MTF cache…")
+    _load_shared_cache()
+    tprint(f"  Shared cache: {len(_SHARED_CACHE):,} stocks pre-loaded (skips yfinance for these)")
     ist_now   = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
     scan_time = ist_now.strftime('%Y-%m-%d %H:%M IST')
     today_str = ist_now.strftime('%Y-%m-%d')
@@ -3095,7 +3148,7 @@ def main():
             data = batch_fetch(batch)
             return idx, data
 
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, 8)) as dl_exe:
+        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, 4)) as dl_exe:
             batch_futs = {dl_exe.submit(_fetch_batch, (idx, b)): idx
                           for idx, b in enumerate(batches)}
             for fut in as_completed(batch_futs):
