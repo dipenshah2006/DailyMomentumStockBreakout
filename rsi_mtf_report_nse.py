@@ -1221,12 +1221,32 @@ def _populate_indices():
     """
     _INDEX_MAP["NIFTY50"] = set(NIFTY50)   # hardcoded fallback always present
 
+    # Maps category label → short suffix used in sector dropdown.
+    # Covers both the XLSX CATEGORY column values ('Sectoral', 'Thematic', …)
+    # AND the longer legacy variants ('Sectoral Indices', …) for forward-compat.
     CAT_SHORT = {
+        # Actual values found in NIFTY_Indices_Master.xlsx CATEGORY column
+        "Sectoral"           : "Sectoral",
+        "Thematic"           : "Thematic",
+        "Strategy"           : "Strategy",
+        "Broad Based"        : "",          # broad → index only, not sector
+        # Legacy / alternative spellings (kept for forward-compat)
         "Sectoral Indices"   : "Sectoral",
         "Thematic Indices"   : "Thematic",
         "Strategy Indices"   : "Strategy",
-        "Broad Based Indices": "",          # broad → index only, not sector
+        "Broad Based Indices": "",
     }
+
+    # Infer category when the CATEGORY column is absent (individual _Stocks sheets)
+    def _sheet_to_cat(sname: str) -> str:
+        su = sname.upper()
+        if 'SECTORAL' in su:
+            return 'Sectoral'
+        if 'THEMATIC' in su:
+            return 'Thematic'
+        if 'STRATEGY' in su:
+            return 'Strategy'
+        return ''   # Broad_Based_Stocks → skip for _SECTOR_MAP
 
     if not os.path.exists(LOCAL_INDICES_XLSX):
         print(f"  ⚠️  '{LOCAL_INDICES_XLSX}' not found")
@@ -1236,8 +1256,9 @@ def _populate_indices():
             import openpyxl
             wb = openpyxl.load_workbook(LOCAL_INDICES_XLSX, read_only=True, data_only=True)
 
+            # Accept 'All_Stocks' (actual sheet name) as well as 'All_Stocks_Combined'
             STOCK_SHEETS = [s for s in wb.sheetnames
-                            if s.endswith('_Stocks') or s == 'All_Stocks_Combined']
+                            if s.endswith('_Stocks') or s in ('All_Stocks_Combined', 'All_Stocks')]
             if not STOCK_SHEETS:
                 STOCK_SHEETS = [s for s in wb.sheetnames if s != 'Summary']
 
@@ -1266,6 +1287,9 @@ def _populate_indices():
                 if header_idx is None or sym_col is None:
                     continue
 
+                # Category fallback: infer from sheet name when column is absent
+                sheet_cat_fallback = _sheet_to_cat(sheet_name)
+
                 for row in rows[header_idx + 1:]:
                     if not row or len(row) <= sym_col:
                         continue
@@ -1281,7 +1305,7 @@ def _populate_indices():
                                 else sheet_name)
                     category = (str(row[cat_col]).strip()
                                 if cat_col is not None and len(row) > cat_col and row[cat_col]
-                                else '')
+                                else sheet_cat_fallback)
 
                     # Add to _INDEX_MAP (all categories)
                     if idx_name not in _INDEX_MAP:
@@ -1762,11 +1786,11 @@ def analyze_stock(ticker: str) -> dict | None:
 
 def generate_chart(data: dict) -> str:
     """Generate a chart PNG file and return its relative path, or '' on error."""
-    import matplotlib
-    matplotlib.use("Agg")   # non-interactive backend — no GUI thread overhead
     ticker  = data["ticker"]
     company = data["company"]
     try:
+        import matplotlib
+        matplotlib.use("Agg")   # non-interactive backend — safe inside try
         df_all = data["_df"]
         n_bars = min(CHART_BARS, len(df_all))
         df     = df_all.iloc[-n_bars:].copy()
@@ -1906,8 +1930,14 @@ def generate_chart(data: dict) -> str:
         return chart_path.replace("\\", "/")
 
     except Exception as exc:
+        import traceback as _tb
+        msg = _tb.format_exc()
         log_error(ticker, company, "CHART", exc)
-        plt.close("all")
+        sys.stderr.write(f"\n   ⚠️ CHART ERROR [{ticker}]: {exc}\n{msg}\n")
+        try:
+            plt.close("all")
+        except Exception:
+            pass
         return ""
 
 
@@ -3536,6 +3566,18 @@ def main(force_charts: bool = False):
     print("╚══════════════════════════════════════════════════════════════════╝")
     print(f"   {RUN_TS} IST  |  Errors → {ERROR_LOG}\n")
     print(f"   Start time : {START_TS} IST\n")
+
+    # ── Guarantee charts folder exists from the very start ────────────────
+    os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
+    print(f"   Charts folder : {os.path.abspath(CHART_OUTPUT_DIR)}")
+
+    # ── Auto-invalidate stale chart cache (older than 2 days) ─────────────
+    if not force_charts and os.path.exists(CHART_CACHE_META):
+        cache_age_days = (time.time() - os.path.getmtime(CHART_CACHE_META)) / 86400
+        if cache_age_days > 2:
+            print(f"   Chart cache is {cache_age_days:.1f} days old — forcing full chart regeneration")
+            force_charts = True
+
     if force_charts:
         print("   Force chart regeneration enabled — cache will be bypassed for all charts.\n")
     log_info(f"=== Scan started {START_TS} ===")

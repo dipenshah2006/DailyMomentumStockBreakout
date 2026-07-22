@@ -1,0 +1,31 @@
+{
+    "daily_period": "max",
+    "intraday_period": "60d",
+    "base_dir": "india/NSE",
+    "master_file": "NSECash/EQUITY_L.csv",
+    "indices_dir": "NseIndice",
+    "output_html": "index_analysis.html",
+    "cache_dir": "cache",
+    "refresh_interval_minutes": 15,
+    "cache_duration_minutes": 5,
+    "charts_output_dir": "charts/index",
+    "ticker_mapping": {
+        "nifty_50": "^NSEI",
+        "nifty_bank": "^NSEBANK",
+        "nifty_privatebank": "NIFTY_PVT_BANK.NS",
+        "nifty_psu_bank": "NIFTY_PSU_BANK.NS",
+        "nifty_auto": "NIFTY_AUTO.NS",
+        "nifty_financial_services": "NIFTY_FIN_SERVICE.NS",
+        "nifty_fmcg": "NIFTY_FMCG.NS",
+        "nifty_it": "NIFTY_IT.NS",
+        "nifty_media": "NIFTY_MEDIA.NS",
+        "nifty_metal": "NIFTY_METAL.NS",
+        "nifty_pharma": "NIFTY_PHARMA.NS",
+        "nifty_realty": "NIFTY_REALTY.NS",
+        "nifty_energy": "NIFTY_ENERGY.NS",
+        "nifty_infra": "NIFTY_INFRA.NS",
+        "nifty_commodities": "NIFTY_COMMODITIES.NS",
+        "nifty_consumption": "NIFTY_CONSUMPTION.NS",
+        "nifty_midsmall_financial_services": "NIFTY_MIDSMALL_FIN_SERVICE.NS"
+    }
+}

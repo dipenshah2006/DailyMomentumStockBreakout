@@ -18,7 +18,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SESSION_SECRET', 'nse-dashboard-secret')
+_session_secret = os.environ.get('SESSION_SECRET')
+if not _session_secret:
+    raise RuntimeError("SESSION_SECRET environment variable is not set. "
+                       "Add it as a Replit Secret before starting the app.")
+app.secret_key = _session_secret
 
 SCRIPT = 'rsi_mtf_report_nse.py'
 IST = pytz.timezone('Asia/Kolkata')
@@ -114,6 +118,99 @@ def run_nse_report():
     finally:
         with job_lock:
             job_running = False
+
+
+def run_asx_report():
+    """Run ASX RSI MTF screener (ASX/NSEScreener71.py) from workspace root."""
+    log.info('Starting ASX screener report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'ASX/NSEScreener71.py'],
+            capture_output=True, text=True, timeout=18000  # 5 hours — no hard limit on self-hosted
+        )
+        if result.returncode == 0:
+            log.info('ASX report completed successfully.')
+        else:
+            log.error(f'ASX report failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('ASX report timed out after 5 hours.')
+    except Exception as e:
+        log.error(f'ASX report error: {e}')
+
+
+def run_usa_report():
+    """Run USA/NYSE RSI MTF screener (USAs/NSEScreener7.py)."""
+    log.info('Starting USA/NYSE screener report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'USAs/NSEScreener7.py'],
+            capture_output=True, text=True, timeout=18000  # 5 hours
+        )
+        if result.returncode == 0:
+            log.info('USA report completed successfully.')
+        else:
+            log.error(f'USA report failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('USA report timed out after 5 hours.')
+    except Exception as e:
+        log.error(f'USA report error: {e}')
+
+
+def run_rocket_scanner():
+    """Run Rocket Scanner (rocket_scanner.py). Seeds cache from RSI MTF cache first."""
+    log.info('Starting Rocket Scanner — seeding cache from RSI MTF cache…')
+    try:
+        subprocess.run(
+            [sys.executable, 'seed_shared_cache.py'],
+            capture_output=True, text=True, timeout=120
+        )
+    except Exception as e:
+        log.warning(f'Rocket cache seed step failed (non-fatal): {e}')
+
+    log.info('Running Rocket Scanner report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'rocket_scanner.py'],
+            capture_output=True, text=True, timeout=7200  # 2 hours — 2000+ stocks
+        )
+        if result.returncode == 0:
+            log.info('Rocket Scanner completed successfully.')
+        else:
+            log.error(f'Rocket Scanner failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('Rocket Scanner timed out after 2 hours.')
+    except Exception as e:
+        log.error(f'Rocket Scanner error: {e}')
+
+
+def run_index_dashboard():
+    """Run NSE Index Dashboard (IndexDashBoard/realtime_analysis4.py).
+    Seeds the per-ticker cache from the RSI MTF cache first so the dashboard
+    skips re-downloading stocks that are already cached.
+    """
+    log.info('Starting Index Dashboard — seeding cache from RSI MTF cache…')
+    try:
+        subprocess.run(
+            [sys.executable, 'seed_shared_cache.py'],
+            capture_output=True, text=True, timeout=120
+        )
+    except Exception as e:
+        log.warning(f'Cache seed step failed (non-fatal): {e}')
+
+    log.info('Running Index Dashboard report…')
+    try:
+        result = subprocess.run(
+            [sys.executable, 'IndexDashBoard/realtime_analysis4.py', 'index_dashboard_config.json'],
+            capture_output=True, text=True, timeout=3600  # 1 hour — index-only, much faster
+        )
+        if result.returncode == 0:
+            log.info('Index Dashboard completed successfully.')
+        else:
+            log.error(f'Index Dashboard failed:\n{result.stderr[-1000:]}')
+    except subprocess.TimeoutExpired:
+        log.error('Index Dashboard timed out after 1 hour.')
+    except Exception as e:
+        log.error(f'Index Dashboard error: {e}')
 
 
 def run_email_send(dry_run=False):
@@ -253,7 +350,7 @@ WAITING_HTML = f"""<!DOCTYPE html>
   <div class="spinner"></div>
   <h1>📈 Indian Stock Market Toolkit</h1>
   <p>No report has been generated yet. The report runs automatically every day at
-     <strong>5:00 AM IST</strong>, or you can trigger it manually below.</p>
+     <strong>9:00 PM IST</strong>, or you can trigger it manually below.</p>
 
   <div class="card">
     <div class="label">Manual trigger</div>
@@ -453,6 +550,76 @@ def rocket():
         return Response(f.read(), mimetype='text/html')
 
 
+@app.route('/fo')
+def fo():
+    path = 'fo_report.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">📊 F&amp;O Multi-Indicator Scanner</h2>'
+            '<p style="color:#94a3b8;">No F&amp;O report yet. Run <code>python fo_scanner_report.py</code> to generate it.</p>'
+            '<p style="color:#64748b;font-size:0.85rem;margin-top:12px;">Indicators: RSI(7/34/200) crossovers · MACD(34,200,9) · '
+            'Chande Kroll Stop · Volume Oscillator · Darvas Box · Bollinger Band · '
+            'Donchian Channel · Trend Channel · S/R Levels · Fibonacci Extension &amp; Retracement (15-min)</p>'
+            '<a href="/" style="color:#38bdf8;margin-top:20px;display:inline-block;">← Back to Full Report</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/asx')
+def asx():
+    path = 'asx_report_NSE.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">🦘 ASX Screener Report</h2>'
+            '<p style="color:#94a3b8;">No ASX report yet — will be generated during the next daily run.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/usa')
+def usa():
+    # USAs/NSEScreener7.py writes to its own SCRIPT_DIR, so look there first
+    path = os.path.join('USAs', 'rsi_mtf_report_NYSE.html')
+    if not os.path.exists(path):
+        path = 'rsi_mtf_report_NYSE.html'   # fallback: root-level output
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">🇺🇸 USA / NYSE Screener Report</h2>'
+            '<p style="color:#94a3b8;">No USA report yet — will be generated during the next daily run.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/index-dashboard')
+def index_dashboard():
+    path = 'index_analysis.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">📊 NSE Index Dashboard</h2>'
+            '<p style="color:#94a3b8;">No Index Dashboard yet — will be generated during the next daily run.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
 @app.route('/intraday')
 def intraday():
     path = 'intraday_report_NSE.html'
@@ -461,6 +628,22 @@ def intraday():
             '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
             '<h2 style="color:#38bdf8;">⚡ Intraday Breakout Scanner</h2>'
             '<p style="color:#94a3b8;">No intraday report yet. Run <code>python intraday_report.py</code> to generate.</p>'
+            '<a href="/" style="color:#38bdf8;">← Back to Full Report</a>'
+            '</body></html>',
+            mimetype='text/html'
+        )
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return Response(f.read(), mimetype='text/html')
+
+
+@app.route('/weekly-digest')
+def weekly_digest():
+    path = 'weekly_digest.html'
+    if not os.path.exists(path):
+        return Response(
+            '<html><body style="font-family:Segoe UI,sans-serif;padding:40px;background:#0f172a;color:#e2e8f0;">'
+            '<h2 style="color:#38bdf8;">📊 NSE Weekly Market Digest</h2>'
+            '<p style="color:#94a3b8;">No weekly digest yet — generated every Saturday at 5:00 AM IST via GitHub Actions.</p>'
             '<a href="/" style="color:#38bdf8;">← Back to Full Report</a>'
             '</body></html>',
             mimetype='text/html'
@@ -899,11 +1082,30 @@ async function pollRun() {{
     return Response(html, mimetype='text/html')
 
 
+def _keep_alive():
+    """Ping ourselves every 10 minutes so Replit never sleeps during market days."""
+    import urllib.request
+    try:
+        host = os.environ.get('REPLIT_DEV_DOMAIN') or '127.0.0.1:5000'
+        url = f'http://127.0.0.1:5000/status'
+        urllib.request.urlopen(url, timeout=10)
+        log.debug('Keep-alive ping sent.')
+    except Exception:
+        pass  # silent — server may not be ready yet
+
+
 if __name__ == '__main__':
     scheduler = BackgroundScheduler(timezone=IST)
-    scheduler.add_job(run_nse_report, 'cron', hour=5, minute=0)
+    # ── Daily reports — 9:00 PM IST ───────────────────────────────────────────
+    scheduler.add_job(run_nse_report,       'cron', hour=21, minute=0)   # NSE RSI MTF
+    scheduler.add_job(run_index_dashboard,  'cron', hour=21, minute=5)   # NSE Index Dashboard
+    scheduler.add_job(run_asx_report,       'cron', hour=21, minute=15)  # ASX screener
+    scheduler.add_job(run_usa_report,       'cron', hour=21, minute=30)  # USA/NYSE screener
+    scheduler.add_job(run_rocket_scanner,   'cron', hour=21, minute=45)  # Rocket Scanner
+    # ── Keep-alive ping — every 10 min ────────────────────────────────────────
+    scheduler.add_job(_keep_alive, 'interval', minutes=10)
     scheduler.start()
-    log.info('Scheduler started — NSE report will run daily at 5:00 AM IST.')
+    log.info('Scheduler started — NSE/Index/ASX/USA/Rocket reports scheduled from 9:00 PM IST daily.')
 
     if not latest_report():
         log.info('No existing report found — generating first report now...')

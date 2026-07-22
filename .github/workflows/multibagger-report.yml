@@ -1,0 +1,140 @@
+name: Multibagger Report
+
+# Runs completely independently — a long runtime here has zero impact
+# on the RSI / ATH / Rocket / F&O reports. When done, the generated
+# HTML is committed back to the repo so the next daily deploy picks it up.
+
+on:
+  schedule:
+    - cron: '30 15 * * *'       # 9:00 PM IST every day = 3:30 PM UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — print recipients, do NOT send email'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: write   # needed to commit multibagger_report.html back to repo
+
+concurrency:
+  group: multibagger-report
+  cancel-in-progress: false   # never cancel a running multibagger — it takes hours
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+
+  multibagger:
+    name: Multibagger Report
+    runs-on: self-hosted      # your own machine — no timeout limit at all
+    # timeout-minutes is intentionally omitted so the job runs as long as needed
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
+            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: stock_data_cache.pkl
+          key: stock-cache-multi-${{ runner.os }}-${{ hashFiles('multibagger_report.py') }}
+          restore-keys: stock-cache-multi-${{ runner.os }}-
+
+      - name: Restore chart cache
+        uses: actions/cache@v4
+        with:
+          path: charts/multibagger/
+          key: chart-cache-multi-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: chart-cache-multi-${{ runner.os }}-
+
+      - name: Create directories
+        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/multibagger
+
+      - name: Download NSE equity list
+        run: |
+          curl -sL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Referer: https://www.nseindia.com/" \
+            --retry 3 --retry-delay 5 --max-time 30 \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
+          || echo "⚠️  NSE CSV blocked — using built-in ticker list"
+
+      - name: Run Multibagger Report
+        id: run
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python multibagger_report.py
+
+      - name: Upload artifact (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multibagger-html-${{ github.run_number }}
+          path: |
+            multibagger_report.html
+            error_log_*.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Commit the generated HTML back to the repo.
+      # The main generate-report.yml will include it in the next Pages deploy.
+      # [skip ci] prevents this commit from triggering other workflows.
+      - name: Commit multibagger_report.html to repo
+        if: steps.run.outcome == 'success'
+        run: |
+          git config user.name  "NSE Bot"
+          git config user.email "bot@noreply"
+          git pull --rebase origin main
+          git add multibagger_report.html
+          git diff --cached --quiet \
+            && echo "No changes in multibagger_report.html — skipping commit" \
+            || (git commit -m "chore: update multibagger_report.html [skip ci]" && git push)
+
+      - name: Send Multibagger email
+        if: steps.run.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    multibagger_report.html
+          EMAIL_SUBJECT_FILE: multibagger_subject.txt
+        run: |
+          DATE=$(date +'%d %b %Y')
+          echo "💎 NSE Multibagger Report — ${DATE}" > multibagger_subject.txt
+          python send_report_email.py
+
+      - name: Send failure notification
+        if: failure()
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_FAILURE_MODE: '1'
+          GITHUB_RUN_ID:      ${{ github.run_id }}
+          GITHUB_RUN_NUMBER:  ${{ github.run_number }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+        run: python send_report_email.py
