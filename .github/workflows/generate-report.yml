@@ -35,9 +35,6 @@ concurrency:
   group: github-pages
   cancel-in-progress: false
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 # ── Each report runs in its own parallel job — a failure or timeout
 # ── in one does NOT affect the others. The deploy job always runs
 # ── at the end to publish whatever succeeded.
