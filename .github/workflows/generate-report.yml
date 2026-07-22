@@ -65,9 +65,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            matplotlib requests openpyxl
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Restore data cache
         uses: actions/cache@v4
@@ -184,9 +182,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            matplotlib requests
+          pip install yfinance pandas numpy matplotlib requests
 
       # Restore RSI cache and seed rocket_cache.pkl from it.
       # If the RSI cache is absent, seed_shared_cache.py exits cleanly and
@@ -244,9 +240,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            matplotlib requests openpyxl
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       # F&O Scanner natively reads stock_data_cache.pkl (same v2 format as RSI MTF).
       # Restoring it here means F&O skips downloading tickers already cached by RSI.
@@ -296,10 +290,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            plotly requests openpyxl \
-            kaleido
+          pip install yfinance pandas numpy plotly requests openpyxl kaleido
 
       - name: Create directories
         run: mkdir -p india/NSE/NSECash india/NSE/NseIndice india/NSE/cache IndexDashBoard/cache charts/index
@@ -368,9 +359,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            matplotlib requests openpyxl
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Create directories
         run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/asx
@@ -418,9 +407,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            matplotlib requests openpyxl
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Create directories
         run: mkdir -p USAs/charts
@@ -471,9 +458,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            yfinance pandas numpy \
-            matplotlib requests openpyxl
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       # Download each report's HTML (continue-on-error so a missing
       # artifact from a failed job does not abort the deploy step)
