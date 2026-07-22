@@ -48,8 +48,8 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 # ── Constants ────────────────────────────────────────────────────────────────
 REPORT_HTML    = "multibagger_report.html"
 TRADES_REPORT_HTML = "multibagger_trades_report.html"
-CHARTS_DIR     = Path("charts/multibagger")
-CACHE_FILE     = Path("charts/multibagger/scan_cache.json")
+CHARTS_DIR     = Path("charts")
+CACHE_FILE     = Path("charts/scan_cache.json")
 LOOKBACK_YEARS = 'max'       # fetch full history from IPO date
 MAX_WORKERS    = 20           # parallel THREADS for I/O-bound downloads (network-bound: GIL released during I/O, so threads work well)
 BATCH_SIZE     = 50           # tickers per yfinance batch download
@@ -2052,9 +2052,9 @@ def process_stock(name, ticker, df_raw=None):
             'darvas_w': dv_w_status, 'darvas_w_top': dv_w_top, 'darvas_w_bot': dv_w_bot,
             'darvas_m': dv_m_status, 'darvas_m_top': dv_m_top, 'darvas_m_bot': dv_m_bot,
             # Chart paths
-            'chart_d': f"charts/multibagger/{safe_sym}_daily.png",
-            'chart_w': f"charts/multibagger/{safe_sym}_weekly.png",
-            'chart_m': f"charts/multibagger/{safe_sym}_monthly.png",
+            'chart_d': f"charts/{safe_sym}_daily.png",
+            'chart_w': f"charts/{safe_sym}_weekly.png",
+            'chart_m': f"charts/{safe_sym}_monthly.png",
         }
     except Exception as e:
         tprint(f"  ⚠️  {ticker}: {e}")
@@ -2698,9 +2698,9 @@ function showChart(sym, tab, url) {{
   // Build all 3 URLs from the daily URL pattern
   const base = url.replace(/_daily|_weekly|_monthly/, '');
   currentUrls = {{
-    d: `charts/multibagger/${{sym}}_daily.png`,
-    w: `charts/multibagger/${{sym}}_weekly.png`,
-    m: `charts/multibagger/${{sym}}_monthly.png`,
+    d: `charts/${{sym}}_daily.png`,
+    w: `charts/${{sym}}_weekly.png`,
+    m: `charts/${{sym}}_monthly.png`,
   }};
   document.getElementById('modalTitle').textContent = sym + ' — ' + tab + ' Chart';
   document.getElementById('chartModal').classList.add('open');

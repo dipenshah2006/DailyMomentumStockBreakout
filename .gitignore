@@ -1,5 +1,5 @@
 # Generated output files
-charts/
+charts/multibagger/scan_cache.json
 *.pkl
 *.tmp
 error_log_*.txt
