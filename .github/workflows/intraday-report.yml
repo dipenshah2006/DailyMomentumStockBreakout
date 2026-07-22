@@ -1,0 +1,112 @@
+name: NSE Intraday Breakout Report
+
+on:
+  schedule:
+    - cron: '0 4 * * 1-5'      # 9:30 AM IST (Mon–Fri) = 4:00 AM UTC
+  workflow_dispatch:             # manual trigger from GitHub UI
+    inputs:
+      dry_run:
+        description: 'Dry run — print recipients, do NOT send email'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: intraday
+  cancel-in-progress: true
+
+jobs:
+  intraday-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Ensure the charts directory exists (some scripts write images to charts/)
+      - name: Ensure charts directory exists
+        run: mkdir -p charts
+
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # ── 3. Install dependencies ──────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" \
+            "pandas>=2.0.0" \
+            "numpy>=1.24.0" \
+            "requests>=2.31.0"
+
+      # ── 4. Download NSE equity list ──────────────────────────────────────────
+      - name: Download NSE equity list
+        run: |
+          mkdir -p india/NSE/NSECash india/NSE
+          curl -fsSL \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -H "User-Agent: Mozilla/5.0" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+            && echo "✅ EQUITY_L.csv downloaded ($(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines)" \
+            || echo "⚠️  NSE download failed — proceeding with any cached CSV"
+
+      # ── 5. Run Intraday Scanner ──────────────────────────────────────────────
+      - name: Run Intraday Breakout Scanner
+        id: intraday_scan
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python intraday_report.py
+
+      # ── 6. Upload report as artifact (for debugging) ─────────────────────────
+      - name: Upload intraday report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intraday-report-${{ github.run_number }}
+          path: intraday_report_NSE.html
+          retention-days: 3
+
+      # ── 7. Send Intraday email ───────────────────────────────────────────────
+      - name: Send Intraday Breakout email
+        if: steps.intraday_scan.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    intraday_report_NSE.html
+          EMAIL_SUBJECT_FILE: intraday_subject.txt
+        run: |
+          DATE=$(date +'%d %b %Y')
+          echo "⚡ NSE Intraday Breakout — ${DATE} 09:30 IST" > intraday_subject.txt
+          python send_report_email.py
+
+      # ── 8. Send failure notification ─────────────────────────────────────────
+      - name: Send failure notification
+        if: failure()
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_FAILURE_MODE: '1'
+          GITHUB_RUN_ID:      ${{ github.run_id }}
+          GITHUB_RUN_NUMBER:  ${{ github.run_number }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+        run: python send_report_email.py

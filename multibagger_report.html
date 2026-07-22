@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🏆 Multibagger Report — NSE Full Scan</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh}
+.header{background:#161b22;border-bottom:1px solid #30363d;padding:14px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.header h1{font-size:1.3rem;font-weight:800;color:#e6edf3}
+.header .sub{font-size:11px;color:#8b949e}
+.nav-pills{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.nav-pills a{background:#1c2128;border:1px solid #30363d;color:#8b949e;text-decoration:none;
+             border-radius:6px;padding:5px 12px;font-size:12px;transition:.15s}
+.nav-pills a:hover,.nav-pills a.active{background:#388bfd22;color:#58a6ff;border-color:#388bfd}
+.stats{display:flex;gap:12px;padding:14px 24px;background:#161b22;border-bottom:1px solid #30363d;flex-wrap:wrap}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 18px;min-width:120px;text-align:center}
+.stat .val{font-size:1.5rem;font-weight:800;color:#e6edf3}
+.stat .lbl{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.8px;margin-top:2px}
+.blast-stat .val{color:#ff9800}
+.controls{padding:12px 24px;background:#0d1117;border-bottom:1px solid #21262d;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.controls input{background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;
+               padding:6px 12px;font-size:12px;outline:none;width:240px}
+.controls input:focus{border-color:#388bfd}
+.filter-btn{background:#1c2128;border:1px solid #30363d;color:#8b949e;border-radius:6px;
+             padding:6px 12px;font-size:12px;cursor:pointer;transition:.15s}
+.filter-btn:hover,.filter-btn.active{background:#388bfd22;color:#58a6ff;border-color:#388bfd}
+.blast-btn{border-color:#ff9800;color:#ff9800;background:#1a0a00}
+.blast-btn:hover,.blast-btn.active{background:#ff980022;border-color:#ff9800;color:#ff9800}
+.sort-btn{background:#0d1117;border:1px solid #21262d;color:#555;border-radius:4px;
+           padding:4px 8px;font-size:11px;cursor:pointer}
+.sort-btn:hover{color:#8b949e}
+.count-badge{font-size:11px;color:#8b949e;margin-left:8px}
+.table-wrap{overflow-x:auto;padding:0 24px 24px}
+table{width:100%;border-collapse:collapse;font-size:12px;min-width:1400px}
+thead th{background:#161b22;color:#8b949e;font-size:10px;font-weight:600;text-transform:uppercase;
+          letter-spacing:.5px;padding:8px 6px;border-bottom:2px solid #30363d;
+          cursor:pointer;white-space:nowrap;position:sticky;top:0;z-index:5}
+thead th:hover{color:#e6edf3}
+tbody tr{border-bottom:1px solid #161b22;transition:.1s}
+tbody tr:hover{background:#161b2255}
+.blast-row{background:#1a0a0033}
+.blast-row:hover{background:#1a0a0066}
+.hidden{display:none}
+/* Modal */
+#chartModal{display:none;position:fixed;inset:0;background:#000000cc;z-index:9999;
+             align-items:center;justify-content:center}
+#chartModal.open{display:flex}
+#modalBox{background:#0d1117;border:1px solid #30363d;border-radius:12px;
+           padding:0;max-width:95vw;max-height:92vh;overflow:hidden;display:flex;flex-direction:column}
+#modalHeader{padding:12px 16px;background:#161b22;border-bottom:1px solid #30363d;
+              display:flex;justify-content:space-between;align-items:center}
+#modalTitle{font-weight:700;font-size:14px;color:#e6edf3}
+#modalClose{background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer;padding:0 4px}
+#modalClose:hover{color:#e6edf3}
+#modalChartTabs{display:flex;gap:0;background:#0d1117;border-bottom:1px solid #30363d}
+.chart-tab{padding:8px 16px;background:none;border:none;color:#8b949e;cursor:pointer;
+            font-size:12px;border-bottom:2px solid transparent}
+.chart-tab:hover{color:#e6edf3}
+.chart-tab.active{color:#58a6ff;border-bottom-color:#58a6ff}
+#modalImgWrap{overflow:auto;flex:1;display:flex;align-items:center;justify-content:center;padding:8px}
+#modalImg{max-width:100%;height:auto;border-radius:4px}
+#modalLoading{padding:40px;color:#8b949e;font-size:14px}
+/* Darvas legend */
+.darvas-legend{display:flex;gap:12px;font-size:11px;color:#8b949e;margin-left:auto}
+.dl{display:flex;align-items:center;gap:4px}
+.dl-dot{width:10px;height:10px;border-radius:2px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🏆 Multibagger Report — NSE Full Scan</h1>
+    <div class="sub">Strategy: ATH Breakout · Ultra-Slow MACD(34,1000,20) · MTF RSI · Darvas Box · Blast Breakout &nbsp;|&nbsp; 2026-06-29 23:20 IST</div>
+  </div>
+  <div class="nav-pills">
+    <a href="/">📊 Full Report</a>
+    <a href="/multibagger" class="active">💎 Multibagger</a>
+    <a href="/ath">🏆 ATH Breakout</a>
+    <a href="/rocket">🚀 Rocket Scanner</a>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="val">5</div><div class="lbl">Stocks Scanned</div></div>
+  <div class="stat"><div class="val">5</div><div class="lbl">With Data</div></div>
+  <div class="stat blast-stat"><div class="val">0</div><div class="lbl">🚀 BLAST Today</div></div>
+  <div class="stat"><div class="val">0</div><div class="lbl">Strong Signals</div></div>
+  <div class="stat"><div class="val">0</div><div class="lbl">M-RSI &gt; 70</div></div>
+  <div class="stat"><div class="val">25.6</div><div class="lbl">Avg Score</div></div>
+</div>
+
+<div class="controls">
+  <input type="text" id="searchBox" placeholder="🔍  Search ticker or company…" oninput="filterTable()">
+
+  <button class="filter-btn blast-btn" id="blastBtn" onclick="toggleFilter('blast')">🚀 BLAST Only</button>
+  <button class="filter-btn" id="buyBtn"   onclick="toggleFilter('buy')">📈 BUY Signals</button>
+  <button class="filter-btn" id="mrsi70Btn" onclick="toggleFilter('mrsi70')">💜 M-RSI &gt; 70</button>
+  <button class="filter-btn" id="dboxBtn"  onclick="toggleFilter('darvas')">📦 Darvas Break</button>
+  <button class="filter-btn" id="allBtn"   onclick="clearFilters()" style="color:#26d07c;border-color:#26d07c;">Show All</button>
+
+  <span class="count-badge" id="countBadge">5 stocks</span>
+
+  <div class="darvas-legend">
+    <div class="dl"><div class="dl-dot" style="background:#00ff88"></div>Breakout</div>
+    <div class="dl"><div class="dl-dot" style="background:#ff4444"></div>Breakdown</div>
+    <div class="dl"><div class="dl-dot" style="background:#fbbf24"></div>In Box</div>
+  </div>
+</div>
+
+<div class="table-wrap">
+<table id="stockTable">
+<thead>
+<tr>
+  <th onclick="sortTable(0,'num')">#</th>
+  <th onclick="sortTable(1,'str')">Ticker / Company</th>
+  <th onclick="sortTable(2,'num')">Price</th>
+  <th onclick="sortTable(3,'num')">ATH%</th>
+  <th onclick="sortTable(4,'num')">M-RSI</th>
+  <th onclick="sortTable(5,'num')">W-RSI</th>
+  <th onclick="sortTable(6,'num')">D-RSI</th>
+  <th onclick="sortTable(7,'num')">MACD US</th>
+  <th onclick="sortTable(8,'str')">🚀 BLAST</th>
+  <th onclick="sortTable(9,'str')">Signal</th>
+  <th onclick="sortTable(10,'num')">Score</th>
+  <th onclick="sortTable(11,'str')">Darvas D</th>
+  <th onclick="sortTable(12,'str')">Darvas W</th>
+  <th onclick="sortTable(13,'str')">Darvas M</th>
+  <th>Resistance</th>
+  <th>Support</th>
+  <th onclick="sortTable(16,'num')">Vol</th>
+  <th onclick="sortTable(17,'num')">Trades</th>
+  <th onclick="sortTable(18,'num')">Win%</th>
+  <th>Charts</th>
+</tr>
+</thead>
+<tbody id="tableBody">
+
+<tr class="stock-row "
+    data-signal="HOLD"
+    data-blast="0"
+    data-score="45"
+    data-mrsi="66.0"
+    data-wrsi="63.5"
+    data-drsi="51.2"
+    data-darvas="BREAKOUT">
+  <td style="color:#555;font-size:11px;padding:6px 4px;">1</td>
+  <td style="padding:6px 8px;min-width:130px;">
+    <div style="font-weight:700;color:#e6edf3;font-size:12px;">POLYCAB</div>
+    <div style="color:#8b949e;font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Polycab India</div>
+  </td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:12px;white-space:nowrap;">₹9,531.0</td>
+  <td style="padding:6px 4px;"><span style="color:#26d07c">-5.5%</span></td>
+  <td style="padding:6px 4px;color:#fbbf24;font-weight:700;">66.0</td>
+  <td style="padding:6px 4px;color:#fbbf24;">63.5</td>
+  <td style="padding:6px 4px;color:#26d07c;">51.2</td>
+  <td style="padding:6px 4px;color:#26d07c;font-size:11px;">
+    ▲3668.94
+  </td>
+  <td style="padding:6px 8px;"><span style="color:#444;font-size:11px;">—</span></td>
+  <td style="padding:6px 8px;"><span style="background:#1a1f2c;color:#8b949e;border:1px solid #8b949e;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;">HOLD</span></td>
+  <td style="padding:6px 4px;color:#e6edf3;font-weight:700;font-size:13px;">45</td>
+  <td style="padding:6px 6px;"><span style="color:#00ff88;font-size:11px;font-weight:600;">BREAKOUT</span></td>
+  <td style="padding:6px 6px;"><span style="color:#00ff88;font-size:11px;font-weight:600;">BREAKOUT</span></td>
+  <td style="padding:6px 6px;"><span style="color:#00ff88;font-size:11px;font-weight:600;">BREAKOUT</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹7,803</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹6,626</span> <span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹7,158</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">1.4x</td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">24</td>
+  <td style="padding:6px 4px;font-size:11px;">
+    <span style="color:#26d07c">48%</span>
+  </td>
+  <td style="padding:6px 6px;white-space:nowrap;"><button onclick="showChart('POLYCAB','Daily','/charts/multibagger/POLYCAB_daily.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Daily</button><button onclick="showChart('POLYCAB','Weekly','/charts/multibagger/POLYCAB_weekly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Weekly</button><button onclick="showChart('POLYCAB','Monthly','/charts/multibagger/POLYCAB_monthly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Monthly</button></td>
+</tr>
+
+<tr class="stock-row "
+    data-signal="HOLD"
+    data-blast="0"
+    data-score="35"
+    data-mrsi="56.5"
+    data-wrsi="60.4"
+    data-drsi="57.1"
+    data-darvas="None">
+  <td style="color:#555;font-size:11px;padding:6px 4px;">2</td>
+  <td style="padding:6px 8px;min-width:130px;">
+    <div style="font-weight:700;color:#e6edf3;font-size:12px;">MANKIND</div>
+    <div style="color:#8b949e;font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Mankind Pharma</div>
+  </td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:12px;white-space:nowrap;">₹2,462.3</td>
+  <td style="padding:6px 4px;"><span style="color:#26d07c">-17.8%</span></td>
+  <td style="padding:6px 4px;color:#26d07c;font-weight:700;">56.5</td>
+  <td style="padding:6px 4px;color:#fbbf24;">60.4</td>
+  <td style="padding:6px 4px;color:#26d07c;">57.1</td>
+  <td style="padding:6px 4px;color:#26d07c;font-size:11px;">
+    ▲286.85
+  </td>
+  <td style="padding:6px 8px;"><span style="color:#444;font-size:11px;">—</span></td>
+  <td style="padding:6px 8px;"><span style="background:#1a1f2c;color:#8b949e;border:1px solid #8b949e;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;">HOLD</span></td>
+  <td style="padding:6px 4px;color:#e6edf3;font-weight:700;font-size:13px;">35</td>
+  <td style="padding:6px 6px;"><span style="color:#555;font-size:11px;font-weight:600;">None</span></td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹2,656</span> <span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹2,302</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹2,023</span> <span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹2,405</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">0.7x</td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">4</td>
+  <td style="padding:6px 4px;font-size:11px;">
+    <span style="color:#26d07c">25%</span>
+  </td>
+  <td style="padding:6px 6px;white-space:nowrap;"><button onclick="showChart('MANKIND','Daily','/charts/multibagger/MANKIND_daily.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Daily</button><button onclick="showChart('MANKIND','Weekly','/charts/multibagger/MANKIND_weekly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Weekly</button><button onclick="showChart('MANKIND','Monthly','/charts/multibagger/MANKIND_monthly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Monthly</button></td>
+</tr>
+
+<tr class="stock-row "
+    data-signal="HOLD"
+    data-blast="0"
+    data-score="30"
+    data-mrsi="50.2"
+    data-wrsi="51.9"
+    data-drsi="53.9"
+    data-darvas="IN BOX">
+  <td style="color:#555;font-size:11px;padding:6px 4px;">3</td>
+  <td style="padding:6px 8px;min-width:130px;">
+    <div style="font-weight:700;color:#e6edf3;font-size:12px;">DIXON</div>
+    <div style="color:#8b949e;font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Dixon Technologies</div>
+  </td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:12px;white-space:nowrap;">₹12,013.0</td>
+  <td style="padding:6px 4px;"><span style="color:#26d07c">-36.5%</span></td>
+  <td style="padding:6px 4px;color:#26d07c;font-weight:700;">50.2</td>
+  <td style="padding:6px 4px;color:#26d07c;">51.9</td>
+  <td style="padding:6px 4px;color:#26d07c;">53.9</td>
+  <td style="padding:6px 4px;color:#26d07c;font-size:11px;">
+    ▲1384.13
+  </td>
+  <td style="padding:6px 8px;"><span style="color:#444;font-size:11px;">—</span></td>
+  <td style="padding:6px 8px;"><span style="background:#1a1f2c;color:#8b949e;border:1px solid #8b949e;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;">HOLD</span></td>
+  <td style="padding:6px 4px;color:#e6edf3;font-weight:700;font-size:13px;">30</td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="color:#555;font-size:11px;font-weight:600;">None</span></td>
+  <td style="padding:6px 6px;"><span style="color:#00ff88;font-size:11px;font-weight:600;">BREAKOUT</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹11,815</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹9,615</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">0.7x</td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">19</td>
+  <td style="padding:6px 4px;font-size:11px;">
+    <span style="color:#26d07c">63%</span>
+  </td>
+  <td style="padding:6px 6px;white-space:nowrap;"><button onclick="showChart('DIXON','Daily','/charts/multibagger/DIXON_daily.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Daily</button><button onclick="showChart('DIXON','Weekly','/charts/multibagger/DIXON_weekly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Weekly</button><button onclick="showChart('DIXON','Monthly','/charts/multibagger/DIXON_monthly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Monthly</button></td>
+</tr>
+
+<tr class="stock-row "
+    data-signal="HOLD"
+    data-blast="0"
+    data-score="13"
+    data-mrsi="45.6"
+    data-wrsi="45.8"
+    data-drsi="64.4"
+    data-darvas="IN BOX">
+  <td style="color:#555;font-size:11px;padding:6px 4px;">4</td>
+  <td style="padding:6px 8px;min-width:130px;">
+    <div style="font-weight:700;color:#e6edf3;font-size:12px;">HDFCBANK</div>
+    <div style="color:#8b949e;font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">HDFC Bank</div>
+  </td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:12px;white-space:nowrap;">₹796.3</td>
+  <td style="padding:6px 4px;"><span style="color:#26d07c">-20.1%</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-weight:700;">45.6</td>
+  <td style="padding:6px 4px;color:#8b949e;">45.8</td>
+  <td style="padding:6px 4px;color:#fbbf24;">64.4</td>
+  <td style="padding:6px 4px;color:#ff6b6b;font-size:11px;">
+    ▼40.40
+  </td>
+  <td style="padding:6px 8px;"><span style="color:#444;font-size:11px;">—</span></td>
+  <td style="padding:6px 8px;"><span style="background:#1a1f2c;color:#8b949e;border:1px solid #8b949e;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;">HOLD</span></td>
+  <td style="padding:6px 4px;color:#e6edf3;font-weight:700;font-size:13px;">13</td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹990</span> <span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹783</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹960</span> <span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹718</span> <span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹888</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">1.2x</td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">24</td>
+  <td style="padding:6px 4px;font-size:11px;">
+    <span style="color:#26d07c">38%</span>
+  </td>
+  <td style="padding:6px 6px;white-space:nowrap;"><button onclick="showChart('HDFCBANK','Daily','/charts/multibagger/HDFCBANK_daily.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Daily</button><button onclick="showChart('HDFCBANK','Weekly','/charts/multibagger/HDFCBANK_weekly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Weekly</button><button onclick="showChart('HDFCBANK','Monthly','/charts/multibagger/HDFCBANK_monthly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Monthly</button></td>
+</tr>
+
+<tr class="stock-row "
+    data-signal="HOLD"
+    data-blast="0"
+    data-score="5"
+    data-mrsi="42.6"
+    data-wrsi="46.6"
+    data-drsi="51.0"
+    data-darvas="None">
+  <td style="color:#555;font-size:11px;padding:6px 4px;">5</td>
+  <td style="padding:6px 8px;min-width:130px;">
+    <div style="font-weight:700;color:#e6edf3;font-size:12px;">NCC</div>
+    <div style="color:#8b949e;font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">NCC</div>
+  </td>
+  <td style="padding:6px 8px;color:#e6edf3;font-size:12px;white-space:nowrap;">₹153.6</td>
+  <td style="padding:6px 4px;"><span style="color:#26d07c">-56.4%</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-weight:700;">42.6</td>
+  <td style="padding:6px 4px;color:#8b949e;">46.6</td>
+  <td style="padding:6px 4px;color:#26d07c;">51.0</td>
+  <td style="padding:6px 4px;color:#ff6b6b;font-size:11px;">
+    ▼22.02
+  </td>
+  <td style="padding:6px 8px;"><span style="color:#444;font-size:11px;">—</span></td>
+  <td style="padding:6px 8px;"><span style="background:#1a1f2c;color:#8b949e;border:1px solid #8b949e;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;white-space:nowrap;">HOLD</span></td>
+  <td style="padding:6px 4px;color:#e6edf3;font-weight:700;font-size:13px;">5</td>
+  <td style="padding:6px 6px;"><span style="color:#555;font-size:11px;font-weight:600;">None</span></td>
+  <td style="padding:6px 6px;"><span style="color:#555;font-size:11px;font-weight:600;">None</span></td>
+  <td style="padding:6px 6px;"><span style="color:#fbbf24;font-size:11px;font-weight:600;">IN BOX</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹155</span> <span style="background:#111;color:#ff6b6b;border:1px solid #ff6b6b33;border-radius:3px;padding:1px 5px;font-size:10px;">₹223</span></td>
+  <td style="padding:6px 6px;"><span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹203</span> <span style="background:#111;color:#26d07c;border:1px solid #26d07c33;border-radius:3px;padding:1px 5px;font-size:10px;">₹136</span></td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">0.8x</td>
+  <td style="padding:6px 4px;color:#8b949e;font-size:11px;">19</td>
+  <td style="padding:6px 4px;font-size:11px;">
+    <span style="color:#26d07c">42%</span>
+  </td>
+  <td style="padding:6px 6px;white-space:nowrap;"><button onclick="showChart('NCC','Daily','/charts/multibagger/NCC_daily.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Daily</button><button onclick="showChart('NCC','Weekly','/charts/multibagger/NCC_weekly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Weekly</button><button onclick="showChart('NCC','Monthly','/charts/multibagger/NCC_monthly.png')" style="background:#1a1f2c;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;margin:1px;">Monthly</button></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- Chart Modal -->
+<div id="chartModal" onclick="if(event.target===this)closeModal()">
+  <div id="modalBox">
+    <div id="modalHeader">
+      <span id="modalTitle">Chart</span>
+      <button id="modalClose" onclick="closeModal()">✕</button>
+    </div>
+    <div id="modalChartTabs">
+      <button class="chart-tab active" id="tab-d" onclick="switchTab('d')">Daily</button>
+      <button class="chart-tab"        id="tab-w" onclick="switchTab('w')">Weekly</button>
+      <button class="chart-tab"        id="tab-m" onclick="switchTab('m')">Monthly</button>
+    </div>
+    <div id="modalImgWrap">
+      <div id="modalLoading">Loading chart…</div>
+      <img id="modalImg" style="display:none" onload="imgLoaded()" onerror="imgError()">
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let activeFilter = null;
+let sortCol = 10, sortDir = -1;  // default: sort by score desc
+
+let currentSym = '', currentUrls = {};
+
+// ── Filter ────────────────────────────────────────────────────────────────────
+function filterTable() {
+  const q    = document.getElementById('searchBox').value.toLowerCase();
+  const rows = document.querySelectorAll('#tableBody .stock-row');
+  let   vis  = 0;
+  rows.forEach(r => {
+    const text = r.textContent.toLowerCase();
+    const matchSearch = !q || text.includes(q);
+    let   matchFilter = true;
+
+    if (activeFilter === 'blast')  matchFilter = r.dataset.blast  === '1';
+    if (activeFilter === 'buy')    matchFilter = ['STRONG BUY','MACD MEGA BUY','BUY','VOL BUY','M-RSI BUY'].includes(r.dataset.signal);
+    if (activeFilter === 'mrsi70') matchFilter = parseFloat(r.dataset.mrsi) >= 70;
+    if (activeFilter === 'darvas') matchFilter = r.dataset.darvas === 'BREAKOUT';
+
+    const show = matchSearch && matchFilter;
+    r.classList.toggle('hidden', !show);
+    if (show) vis++;
+  });
+  document.getElementById('countBadge').textContent = vis + ' stocks';
+}
+
+function toggleFilter(name) {
+  activeFilter = (activeFilter === name) ? null : name;
+  ['blastBtn','buyBtn','mrsi70Btn','dboxBtn'].forEach(id => {
+    document.getElementById(id).classList.remove('active');
+  });
+  const map = {blast:'blastBtn',buy:'buyBtn',mrsi70:'mrsi70Btn',darvas:'dboxBtn'};
+  if (activeFilter && map[activeFilter]) document.getElementById(map[activeFilter]).classList.add('active');
+  filterTable();
+}
+
+function clearFilters() {
+  activeFilter = null;
+  document.getElementById('searchBox').value = '';
+  ['blastBtn','buyBtn','mrsi70Btn','dboxBtn'].forEach(id => document.getElementById(id).classList.remove('active'));
+  filterTable();
+}
+
+// ── Sort ──────────────────────────────────────────────────────────────────────
+function sortTable(col, type) {
+  if (sortCol === col) sortDir *= -1;
+  else { sortCol = col; sortDir = -1; }
+  const tbody = document.getElementById('tableBody');
+  const rows  = Array.from(tbody.querySelectorAll('.stock-row'));
+  rows.sort((a, b) => {
+    const av = a.cells[col].textContent.replace(/[₹,%+]/g,'').trim();
+    const bv = b.cells[col].textContent.replace(/[₹,%+]/g,'').trim();
+    if (type === 'num') return (parseFloat(av)||0 - parseFloat(bv)||0) * sortDir;
+    return av.localeCompare(bv) * sortDir;
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+// ── Chart Modal ───────────────────────────────────────────────────────────────
+function showChart(sym, tab, url) {
+  currentSym  = sym;
+  const suffix = tab.toLowerCase() === 'daily'   ? 'd' :
+                 tab.toLowerCase() === 'weekly'  ? 'w' : 'm';
+  // Build all 3 URLs from the daily URL pattern
+  const base = url.replace(/_daily|_weekly|_monthly/, '');
+  currentUrls = {
+    d: `/charts/multibagger/${sym}_daily.png`,
+    w: `/charts/multibagger/${sym}_weekly.png`,
+    m: `/charts/multibagger/${sym}_monthly.png`,
+  };
+  document.getElementById('modalTitle').textContent = sym + ' — ' + tab + ' Chart';
+  document.getElementById('chartModal').classList.add('open');
+  switchTab(suffix);
+}
+
+function switchTab(t) {
+  ['d','w','m'].forEach(tab => {
+    document.getElementById('tab-'+tab).classList.toggle('active', tab===t);
+  });
+  document.getElementById('modalLoading').style.display = 'block';
+  document.getElementById('modalImg').style.display     = 'none';
+  document.getElementById('modalImg').src = currentUrls[t] + '?t=' + Date.now();
+}
+
+function imgLoaded() {
+  document.getElementById('modalLoading').style.display = 'none';
+  document.getElementById('modalImg').style.display     = 'block';
+}
+function imgError() {
+  document.getElementById('modalLoading').textContent = '⚠️ Chart not available yet';
+}
+
+function closeModal() {
+  document.getElementById('chartModal').classList.remove('open');
+  document.getElementById('modalImg').src = '';
+}
+
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeModal(); });
+</script>
+</body>
+</html>

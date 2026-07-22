@@ -1,0 +1,215 @@
+name: Sunday Weekly Digest
+
+on:
+  schedule:
+    - cron: '30 15 * * 6,0'  # 9:00 PM IST Sat & Sun = 3:30 PM UTC Sat & Sun
+  workflow_dispatch:          # manual trigger from GitHub UI
+    inputs:
+      dry_run:
+        description: 'Dry run — print recipients, do NOT send email'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: sunday-pages
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  sunday-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # ── 3. Install dependencies (lighter set — no ta-lib-easy needed) ──────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" \
+            "pandas>=2.0.0" \
+            "numpy>=1.24.0" \
+            "matplotlib>=3.7.0" \
+            "requests>=2.31.0" \
+            "openpyxl>=3.1.0"
+
+      # ── 4. Create required directories ─────────────────────────────────────
+      - name: Create directories
+        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts
+
+      # ── 5. Download NSE equity list ────────────────────────────────────────
+      - name: Download NSE equity list
+        run: |
+          curl -sL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Referer: https://www.nseindia.com/" \
+            --retry 3 --retry-delay 5 --max-time 30 \
+            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
+            -o india/NSE/NSECash/EQUITY_L.csv \
+          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
+          || echo "⚠️  NSE CSV blocked — script will use built-in ticker list"
+
+      # ── 6. Run Weekly Digest (~400 F&O stocks, fast) ───────────────────────
+      - name: Generate Weekly Digest
+        id: weekly_digest
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python weekly_digest.py
+
+      # ── 7. Run ATH Breakout Report ─────────────────────────────────────────
+      - name: Run ATH Breakout Report
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python ath_report.py || echo "⚠️  ATH report failed — continuing"
+
+      # ── 8. Run Rocket Scanner ──────────────────────────────────────────────
+      - name: Run Rocket Scanner
+        env:
+          MPLBACKEND: Agg
+          PYTHONUNBUFFERED: '1'
+        run: python rocket_scanner.py || echo "⚠️  Rocket scanner failed — continuing"
+
+      # ── 9. Prepare GitHub Pages output ────────────────────────────────────
+      - name: Prepare GitHub Pages output
+        run: |
+          mkdir -p _site
+
+          # Sunday: weekly_digest is the main page
+          if [ -f "weekly_digest.html" ]; then
+            cp weekly_digest.html _site/index.html
+            echo "✅ Weekly digest copied: $(du -sh weekly_digest.html | cut -f1)"
+          else
+            echo "❌ weekly_digest.html not found!"
+            exit 1
+          fi
+
+          if [ -f "ath_report_NSE.html" ]; then
+            cp ath_report_NSE.html _site/ath.html
+            echo "✅ ATH report copied"
+          fi
+
+          if [ -f "rocket_scan_latest.html" ]; then
+            cp rocket_scan_latest.html _site/rocket.html
+            echo "✅ Rocket scan copied"
+          fi
+
+          if [ -d "charts" ] && ls charts/*.png &>/dev/null; then
+            cp -r charts/ _site/charts/
+            echo "✅ Charts: $(ls charts/*.png | wc -l) files"
+          fi
+
+      # ── 10. Upload digest as artifact ──────────────────────────────────────
+      - name: Upload digest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunday-digest-${{ github.run_number }}
+          path: weekly_digest.html
+          retention-days: 7
+
+      # ── 11. Upload Pages artifact ──────────────────────────────────────────
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      # ── 12. Deploy to GitHub Pages ─────────────────────────────────────────
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # ── 13. Send Weekly Digest email ───────────────────────────────────────
+      - name: Send Weekly Digest email
+        if: steps.weekly_digest.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    weekly_digest.html
+          EMAIL_SUBJECT_FILE: weekly_subject.txt
+        run: |
+          WEEK=$(date +'%d %b %Y')
+          echo "📊 NSE Weekly Market Digest — Week of ${WEEK}" > weekly_subject.txt
+          python send_report_email.py
+
+      # ── 14. Send ATH email ─────────────────────────────────────────────────
+      - name: Send ATH Breakout email
+        if: steps.weekly_digest.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    ath_report_NSE.html
+          EMAIL_SUBJECT_FILE: ath_subject.txt
+        run: |
+          if [ ! -f ath_report_NSE.html ]; then
+            echo "⚠️  ath_report_NSE.html not found — skipping ATH email"
+            exit 0
+          fi
+          DATE=$(date +'%d %b %Y')
+          echo "🏆 NSE ATH Breakout Report — ${DATE}" > ath_subject.txt
+          python send_report_email.py
+
+      # ── 15. Send Rocket Scanner email ──────────────────────────────────────
+      - name: Send Rocket Scanner email
+        if: steps.weekly_digest.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    rocket_scan_latest.html
+          EMAIL_SUBJECT_FILE: rocket_subject.txt
+        run: |
+          if [ ! -f rocket_scan_latest.html ]; then
+            echo "⚠️  rocket_scan_latest.html not found — skipping rocket email"
+            exit 0
+          fi
+          DATE=$(date +'%d %b %Y')
+          echo "🚀 NSE Rocket Scanner — Weekend Picks ${DATE}" > rocket_subject.txt
+          python send_report_email.py
+
+      # ── 16. Send failure email ─────────────────────────────────────────────
+      - name: Send failure email
+        if: steps.weekly_digest.outcome == 'failure'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_FAILURE_MODE: '1'
+          GITHUB_RUN_ID:      ${{ github.run_id }}
+          GITHUB_RUN_NUMBER:  ${{ github.run_number }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+        run: python send_report_email.py

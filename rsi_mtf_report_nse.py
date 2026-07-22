@@ -29,6 +29,18 @@ SERIES_FILTER       = ["EQ"]       # NSE equity series (EQ = cash equities)
 LOCAL_SME_CSV       = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
 SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
 
+# Nifty Indices Master Excel — multi-sheet workbook with *_Stocks sheets
+# Layout: sheets named Broad_Based_Stocks, Sectoral_Stocks, Thematic_Stocks,
+#         Strategy_Stocks, All_Stocks_Combined
+# Columns: #, Index Name, Category, Symbol, Company Name  (header on row 3)
+LOCAL_INDICES_XLSX  = "india/NSE/NIFTY_Indices_Master.xlsx"
+
+# Optional: folder containing individual NSE index constituent CSVs
+# e.g. india/NSE/Indices/ind_nifty50list.csv, ind_niftybanklist.csv, etc.
+# Download from: https://www.niftyindices.com/indices/equity/broad-based-indices
+LOCAL_INDICES_DIR   = "india/NSE/Indices"
+LOCAL_FO_CSV        = "india/NSE/nse_fo_list.csv"   # NSE F&O securities list
+
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
 MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise top N stocks
@@ -37,8 +49,10 @@ _chart_override = os.environ.get("MAX_CHART_STOCKS_OVERRIDE", "")
 if _chart_override.isdigit():
     MAX_CHART_STOCKS = int(_chart_override)
 CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
-CHART_BARS          = 120       # bars per chart (fewer = smaller PNG)
-CHART_DPI           = 200       # Ultra HD charts — crisp, professional quality
+GITHUB_CHARTS_BASE  = "charts"   # "https://raw.githubusercontent.com/dipenshah2006/DailyMomentumStockBreakout/main/charts"
+
+CHART_BARS          = 90        # bars per chart — 90 days is plenty; 120 adds ~25% render time
+CHART_DPI           = 120       # Good quality; 200 is overkill and ~3x slower
 
 FRESH_DAYS_D        = 3
 FRESH_WEEKS_W       = 2
@@ -118,7 +132,7 @@ import sys
 import time
 import traceback
 import warnings
-from concurrent.futures import ThreadPoolExecutor as ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import argparse
@@ -134,7 +148,7 @@ import yfinance as yf
 
 warnings.filterwarnings("ignore")
 
-CHART_WORKERS = min(8, max(1, (os.cpu_count() or 4) - 1))
+CHART_WORKERS = min(12, max(2, (os.cpu_count() or 4)))
 
 RUN_TS      = datetime.now().strftime("%d %b %Y  %H:%M")
 _STAMP      = datetime.now().strftime("%d%m%Y_%H%M")
@@ -201,6 +215,7 @@ _LISTING_DATE_MAP: dict[str, str] = {}   # symbol → listing date string
 _SME_STOCKS: set[str] = set()   # set of SME stock symbols
 _SECTOR_MAP: dict[str, str] = {}   # symbol → sector/industry name
 _INDEX_MAP: dict[str, set[str]] = {}   # index name → set of symbols in that index
+_FO_SET:     set[str]            = {}
 _MARKETCAP_MAP: dict[str, float] = {}   # symbol → market cap in rupees
 
 def get_company_name(ticker: str) -> str:
@@ -209,8 +224,11 @@ def get_company_name(ticker: str) -> str:
 def is_sme_stock(ticker: str) -> bool:
     return ticker in _SME_STOCKS
 
-def get_sector(ticker: str) -> str | None:
-    return _SECTOR_MAP.get(ticker)
+def get_sector(ticker: str) -> list[str]:
+    """Return list of sector labels for this ticker (e.g. ['NIFTY AUTO - Sectoral',
+    'NIFTY MOBILITY - Thematic']). Empty list if none."""
+    v = _SECTOR_MAP.get(ticker, [])
+    return v if isinstance(v, list) else [v] if v else []
 
 def get_indices(ticker: str) -> list[str]:
     """Get list of indices this stock belongs to."""
@@ -219,6 +237,11 @@ def get_indices(ticker: str) -> list[str]:
         if ticker in symbols:
             result.append(idx_name)
     return result
+
+
+def is_fo_stock(ticker: str) -> bool:
+    """Return True if this ticker is F&O eligible on NSE."""
+    return ticker in _FO_SET
 
 # Note: get_marketcap() is defined in Section 2 (cache) with TTL-aware logic
 
@@ -250,14 +273,22 @@ def get_min_candles_required(ticker: str) -> int:
     return MIN_CANDLES  # MIN_CANDLES=1: accept any stock with at least 1 candle
 
 def _build_company_map(text: str):
-    """Parse NSE CSV and build symbol → company name and listing date dicts."""
+    """
+    Parse NSE CSV and build symbol → company name and listing date dicts.
+    Also captures INDUSTRY/SECTOR column if present (NSE EQUITY_L.csv does NOT
+    have this column — sector data comes from _populate_indices instead).
+    Robust to column names with leading/trailing spaces.
+    """
     reader = csv.DictReader(io.StringIO(text))
+    # Normalise column names once: strip whitespace from all header keys
     for row in reader:
-        sym  = row.get("SYMBOL", "").strip()
-        name = row.get("NAME OF COMPANY", row.get("COMPANY NAME", "")).strip()
-        # Handle column names with leading spaces
-        date_str = row.get("DATE OF LISTING", row.get(" DATE OF LISTING", "")).strip()
-        sector = row.get("INDUSTRY", row.get(" INDUSTRY", "")).strip()
+        clean = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items() if k}
+        sym = clean.get("SYMBOL", "").strip()
+        name = (clean.get("NAME OF COMPANY") or clean.get("COMPANY NAME") or "").strip()
+        date_str = (clean.get("DATE OF LISTING") or "").strip()
+        # INDUSTRY column: present in some NSE data exports, absent in EQUITY_L.csv
+        sector = (clean.get("INDUSTRY") or clean.get("SECTOR") or clean.get("MACRO SECTOR")
+                  or clean.get("BASIC INDUSTRY") or "").strip()
         if sym:
             _COMPANY_MAP[sym] = name or sym
             if date_str:
@@ -295,7 +326,7 @@ from datetime import date as _date, timedelta as _td
 
 MCAP_TTL_DAYS  = 7          # refresh market cap if older than this many days
 DL_BATCH_SIZE  = 50         # tickers per yf.download() batch call
-DL_MAX_WORKERS = 4          # parallel threads for batch downloads
+DL_MAX_WORKERS = 8          # parallel threads for batch downloads
 CACHE_SAVE_INT = 200        # save cache to disk every N tickers processed
 STALE_BUCKET_DAYS = 7       # group stale tickers whose missing ranges are close
 
@@ -757,6 +788,25 @@ def calc_atr(high, low, close, period=14):
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
+def calc_bb(close, period=20, std_mult=2.0):
+    """Bollinger Bands: returns (upper, mid, lower) series."""
+    mid   = close.rolling(period).mean()
+    std   = close.rolling(period).std(ddof=0)
+    upper = mid + std_mult * std
+    lower = mid - std_mult * std
+    return upper, mid, lower
+
+def calc_mfi(high, low, close, volume, period=14):
+    """Money Flow Index (0-100): institutional buying/selling pressure."""
+    tp      = (high + low + close) / 3
+    raw_mf  = tp * volume
+    pos_mf  = raw_mf.where(tp > tp.shift(1), 0.0)
+    neg_mf  = raw_mf.where(tp < tp.shift(1), 0.0)
+    pos_sum = pos_mf.rolling(period).sum()
+    neg_sum = neg_mf.rolling(period).sum()
+    mfr     = pos_sum / (neg_sum + 1e-10)
+    return 100 - (100 / (1 + mfr))
+
 def resample_ohlcv(df, rule):
     return df.resample(rule).agg({
         "Open": "first", "High": "max", "Low": "min",
@@ -831,6 +881,50 @@ def compute_score(rsi_d, rsi_d_sma, rsi_w, rsi_w_sma, rsi_m, rsi_m_sma,
     if rsi_d > 60:  score += 1; sigs.append("D-RSI>60 🔥")
     if rsi_w > 55:  score += 1; sigs.append("W-RSI>55 💪")
     return score, sigs
+
+
+def compute_explosive_score(rsi_d, vol_ratio, close, bb_upper, bb_slope,
+                             macd_hist, macd_hist_prev, mfi, cci_200, donchian_d):
+    """
+    Explosive Breakout Score (0-12): catches MTAR/HFCL/Adani-type 50-100% moves.
+    Weighted combination of volume surge, BB breakout, MACD acceleration,
+    institutional MFI, long-term CCI(200), and Donchian channel breakout.
+    RSI > 40 is a prerequisite filter, not a scored component here.
+    """
+    escore, sigs = 0, []
+
+    # ── RSI momentum headroom ─────────────────────────────────────────────
+    if rsi_d > 70:   escore += 2; sigs.append("RSI>70 🔥🔥")
+    elif rsi_d > 60: escore += 1; sigs.append("RSI>60 🔥")
+
+    # ── Volume surge (primary explosive signal) ───────────────────────────
+    if vol_ratio >= 5.0:   escore += 3; sigs.append(f"Vol {vol_ratio:.1f}x 🚀🚀🚀")
+    elif vol_ratio >= 2.5: escore += 2; sigs.append(f"Vol {vol_ratio:.1f}x 🚀🚀")
+    elif vol_ratio >= 1.5: escore += 1; sigs.append(f"Vol {vol_ratio:.1f}x 🚀")
+
+    # ── Bollinger Band breakout + slope ───────────────────────────────────
+    if close > bb_upper:    escore += 2; sigs.append("BB Breakout ⚡")
+    elif bb_slope > 1.0:    escore += 1; sigs.append("BB Steep 📈")
+
+    # ── MACD histogram acceleration ───────────────────────────────────────
+    if macd_hist > 0 and macd_hist > macd_hist_prev:
+        escore += 2; sigs.append("MACD Accel ✅")
+    elif macd_hist > 0:
+        escore += 1; sigs.append("MACD+ ✅")
+
+    # ── MFI: institutional money flow ─────────────────────────────────────
+    if mfi > 70:   escore += 2; sigs.append("MFI>70 💪💪")
+    elif mfi > 50: escore += 1; sigs.append("MFI>50 💪")
+
+    # ── CCI(200): long-term trend alignment ───────────────────────────────
+    if cci_200 > 100:  escore += 2; sigs.append("CCI200>100 💥")
+    elif cci_200 > 0:  escore += 1; sigs.append("CCI200>0 ✅")
+
+    # ── Donchian 20-day channel breakout ──────────────────────────────────
+    if donchian_d is not None and donchian_d >= -0.5:
+        escore += 1; sigs.append("D20 Break 🎯")
+
+    return min(escore, 12), sigs
 
 def signal_label(score, phase, fresh_d, fresh_w, rsi_d, rsi_w, rsi_m,
                  rsi_d_sma, rsi_w_sma, rsi_m_sma):
@@ -959,10 +1053,331 @@ BUILTIN = [
     "HDFCAMC","NIPPONLIFE","ABSLAMC","SBICARD","OBEROIRLTY","PRESTIGE","BRIGADE",
 ]
 
-def _populate_indices():
-    """Populate index membership from built-in NIFTY50 list."""
-    _INDEX_MAP["NIFTY50"] = set(NIFTY50)
+def _load_fo_list():
+    """
+    Load NSE F&O eligible securities into _FO_SET.
 
+    Sources tried in order:
+    1. LOCAL_FO_CSV  — cached CSV from a previous download or user-placed file
+                        Columns expected: SYMBOL (+ optional INSTRUMENT, MARKET_TYPE)
+    2. NSE API       — https://www.nseindia.com/api/foSecList
+                        Auto-downloaded and cached to LOCAL_FO_CSV on success.
+
+    The CSV can be generated once with:
+        import requests, pandas as pd
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0", "Referer": "https://www.nseindia.com/"})
+        s.get("https://www.nseindia.com/")
+        r = s.get("https://www.nseindia.com/api/foSecList")
+        df = pd.DataFrame(r.json()["data"])
+        df.to_csv("india/NSE/nse_fo_list.csv", index=False)
+    """
+    global _FO_SET
+
+    # ── Try local CSV first ──────────────────────────────────────────────────
+    if os.path.exists(LOCAL_FO_CSV):
+        try:
+            with open(LOCAL_FO_CSV, encoding="utf-8", errors="replace") as f:
+                raw = f.read().lstrip("\ufeff")
+            reader = csv.DictReader(io.StringIO(raw))
+            loaded = set()
+            for row in reader:
+                # Normalise column names (strip spaces)
+                clean = {k.strip().upper(): (v.strip() if v else "") for k, v in row.items() if k}
+                sym = clean.get("SYMBOL", "")
+                if sym:
+                    loaded.add(sym.upper())
+            _FO_SET = loaded
+            print(f"  ✅ F&O list loaded : {len(_FO_SET)} symbols ← '{LOCAL_FO_CSV}'")
+            return
+        except Exception as e:
+            print(f"  [!] Error reading '{LOCAL_FO_CSV}': {e}")
+
+    # ── Try NSE archives (fo_mktlots.csv) — works from GitHub Actions ────────
+    print(f"  ℹ️  '{LOCAL_FO_CSV}' not found — trying NSE archives...")
+    _INDEX_SYMS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+                   "NIFTYNXT50", "SENSEX", "BANKEX"}
+    try:
+        import csv as _csv, io as _io
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.nseindia.com/",
+        })
+        r = s.get(
+            "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+            timeout=20, verify=False
+        )
+        r.raise_for_status()
+        reader = _csv.DictReader(_io.StringIO(r.text))
+        symbols: set[str] = set()
+        rows_raw = []
+        for row in reader:
+            clean = {k.strip(): (v.strip() if v else "") for k, v in row.items()}
+            sym = clean.get("SYMBOL", "").upper()
+            if sym and sym not in _INDEX_SYMS:
+                symbols.add(sym)
+                rows_raw.append({"SYMBOL": sym, "UNDERLYING": clean.get("UNDERLYING", "")})
+        if not symbols:
+            raise ValueError("Empty fo_mktlots.csv response")
+        _FO_SET = symbols
+        print(f"  ✅ F&O list fetched : {len(_FO_SET)} symbols from NSE archives")
+
+        # Cache to CSV for future runs
+        try:
+            os.makedirs(os.path.dirname(LOCAL_FO_CSV), exist_ok=True)
+            import pandas as _pd
+            _pd.DataFrame(rows_raw).drop_duplicates("SYMBOL").to_csv(LOCAL_FO_CSV, index=False)
+            print(f"  💾 F&O list cached  : '{LOCAL_FO_CSV}'")
+        except Exception as ce:
+            print(f"  [!] Could not cache F&O list: {ce}")
+        return
+
+    except Exception as e:
+        print(f"  [!] NSE archives failed ({e}) — trying NSE API...")
+
+    # ── Try NSE API (may be blocked outside India) ────────────────────────────
+    try:
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/",
+        })
+        s.get("https://www.nseindia.com/", timeout=10)
+        r = s.get("https://www.nseindia.com/api/foSecList", timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        rows = data.get("data", data) if isinstance(data, dict) else data
+        if not rows:
+            raise ValueError("Empty response from foSecList API")
+
+        symbols = {str(row.get("SYMBOL", "")).strip().upper()
+                   for row in rows if row.get("SYMBOL")}
+        symbols.discard("")
+        _FO_SET = symbols
+        print(f"  ✅ F&O list fetched : {len(_FO_SET)} symbols from NSE API")
+
+        try:
+            os.makedirs(os.path.dirname(LOCAL_FO_CSV), exist_ok=True)
+            import pandas as _pd
+            _pd.DataFrame(rows).to_csv(LOCAL_FO_CSV, index=False)
+            print(f"  💾 F&O list cached  : '{LOCAL_FO_CSV}'")
+        except Exception as ce:
+            print(f"  [!] Could not cache F&O list: {ce}")
+
+    except Exception as e:
+        print(f"  [!] NSE API also failed ({e}) — F&O filter unavailable")
+        _FO_SET = set()
+
+
+def _parse_index_symbols(rows: list[tuple]) -> tuple[int, set[str]]:
+    """
+    Auto-detect symbol column and return (header_row_idx, set_of_symbols).
+    Handles NSE-style CSV: Symbol, Company Name, Series, ISIN Code
+    """
+    SKIP = {"SYMBOL","SYMBOLS","TICKER","COMPANY","COMPANY NAME","ISIN",
+            "ISIN CODE","NAME","SERIES","SECURITY","INDEX NAME","SCRIP","N/A","NA","-",""}
+    if not rows:
+        return 0, set()
+    header_row_idx = 0
+    sym_col = None
+    first = [str(c).strip().upper() if c else '' for c in rows[0]]
+    for ci, val in enumerate(first):
+        if val in ("SYMBOL","SYMBOLS","TICKER","SCRIP","NSE SYMBOL"):
+            sym_col = ci
+            header_row_idx = 1
+            break
+    if sym_col is None:
+        if first[0] if first else '' in SKIP:
+            header_row_idx = 1
+        sym_col = 0
+    symbols: set[str] = set()
+    for row in rows[header_row_idx:]:
+        if not row: continue
+        cell = row[sym_col] if len(row) > sym_col else None
+        if not cell: continue
+        sym = str(cell).strip().upper()
+        if sym and sym not in SKIP and not sym.isdigit() and len(sym) <= 20:
+            symbols.add(sym)
+    return header_row_idx, symbols
+
+
+def _populate_indices():
+    """
+    Populate _INDEX_MAP and _SECTOR_MAP from NIFTY_Indices_Master.xlsx.
+
+    _INDEX_MAP : { index_name -> set of symbols }  — all 52 indices
+    _SECTOR_MAP: { symbol -> list of sector labels }
+                 Every Sectoral / Thematic / Strategy index a symbol belongs to
+                 becomes a separate sector label: "NIFTY CPSE - Thematic",
+                 "NIFTY AUTO - Sectoral", "NIFTY ALPHA 50 - Strategy", etc.
+                 Broad-Based indices (NIFTY 50, NIFTY 200 …) are NOT added here
+                 because they are market-cap bands, not sector/industry groups.
+
+    Sector dropdown shows all 38 Sectoral+Thematic+Strategy options.
+    Selecting one shows every stock that belongs to that index.
+    """
+    _INDEX_MAP["NIFTY50"] = set(NIFTY50)   # hardcoded fallback always present
+
+    # Maps category label → short suffix used in sector dropdown.
+    # Covers both the XLSX CATEGORY column values ('Sectoral', 'Thematic', …)
+    # AND the longer legacy variants ('Sectoral Indices', …) for forward-compat.
+    CAT_SHORT = {
+        # Actual values found in NIFTY_Indices_Master.xlsx CATEGORY column
+        "Sectoral"           : "Sectoral",
+        "Thematic"           : "Thematic",
+        "Strategy"           : "Strategy",
+        "Broad Based"        : "",          # broad → index only, not sector
+        # Legacy / alternative spellings (kept for forward-compat)
+        "Sectoral Indices"   : "Sectoral",
+        "Thematic Indices"   : "Thematic",
+        "Strategy Indices"   : "Strategy",
+        "Broad Based Indices": "",
+    }
+
+    # Infer category when the CATEGORY column is absent (individual _Stocks sheets)
+    def _sheet_to_cat(sname: str) -> str:
+        su = sname.upper()
+        if 'SECTORAL' in su:
+            return 'Sectoral'
+        if 'THEMATIC' in su:
+            return 'Thematic'
+        if 'STRATEGY' in su:
+            return 'Strategy'
+        return ''   # Broad_Based_Stocks → skip for _SECTOR_MAP
+
+    if not os.path.exists(LOCAL_INDICES_XLSX):
+        print(f"  ⚠️  '{LOCAL_INDICES_XLSX}' not found")
+        print(f"       Expected at: {os.path.abspath(LOCAL_INDICES_XLSX)}")
+    else:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(LOCAL_INDICES_XLSX, read_only=True, data_only=True)
+
+            # Accept 'All_Stocks' (actual sheet name) as well as 'All_Stocks_Combined'
+            STOCK_SHEETS = [s for s in wb.sheetnames
+                            if s.endswith('_Stocks') or s in ('All_Stocks_Combined', 'All_Stocks')]
+            if not STOCK_SHEETS:
+                STOCK_SHEETS = [s for s in wb.sheetnames if s != 'Summary']
+
+            # sym → set of sector labels (one per qualifying index)
+            _sym_sectors: dict[str, set[str]] = {}
+
+            for sheet_name in STOCK_SHEETS:
+                ws   = wb[sheet_name]
+                rows = list(ws.iter_rows(values_only=True))
+                if len(rows) < 4:
+                    continue
+
+                # Locate header row that contains 'SYMBOL'
+                header_idx = sym_col = idx_col = cat_col = None
+                for ri, row in enumerate(rows[:6]):
+                    if not row:
+                        continue
+                    norm = [str(c).strip().upper() if c else '' for c in row]
+                    if 'SYMBOL' in norm:
+                        header_idx = ri
+                        sym_col    = norm.index('SYMBOL')
+                        idx_col    = norm.index('INDEX NAME') if 'INDEX NAME' in norm else None
+                        cat_col    = norm.index('CATEGORY')   if 'CATEGORY'   in norm else None
+                        break
+
+                if header_idx is None or sym_col is None:
+                    continue
+
+                # Category fallback: infer from sheet name when column is absent
+                sheet_cat_fallback = _sheet_to_cat(sheet_name)
+
+                for row in rows[header_idx + 1:]:
+                    if not row or len(row) <= sym_col:
+                        continue
+                    sym = row[sym_col]
+                    if not sym:
+                        continue
+                    sym = str(sym).strip().upper()
+                    if not sym or sym.isdigit() or len(sym) > 20:
+                        continue
+
+                    idx_name = (str(row[idx_col]).strip()
+                                if idx_col is not None and len(row) > idx_col and row[idx_col]
+                                else sheet_name)
+                    category = (str(row[cat_col]).strip()
+                                if cat_col is not None and len(row) > cat_col and row[cat_col]
+                                else sheet_cat_fallback)
+
+                    # Add to _INDEX_MAP (all categories)
+                    if idx_name not in _INDEX_MAP:
+                        _INDEX_MAP[idx_name] = set()
+                    _INDEX_MAP[idx_name].add(sym)
+
+                    # Add sector label for Sectoral / Thematic / Strategy only
+                    short = CAT_SHORT.get(category, None)
+                    if short is not None and short != '':
+                        label = f"{idx_name} - {short}"
+                        if sym not in _sym_sectors:
+                            _sym_sectors[sym] = set()
+                        _sym_sectors[sym].add(label)
+
+            # Commit to _SECTOR_MAP as sorted list per symbol
+            for sym, labels in _sym_sectors.items():
+                _SECTOR_MAP[sym] = sorted(labels)
+
+            # Remove sheet-name ghost keys
+            for ghost in ['All_Stocks_Combined', 'Broad_Based_Stocks',
+                          'Sectoral_Stocks', 'Thematic_Stocks', 'Strategy_Stocks']:
+                _INDEX_MAP.pop(ghost, None)
+
+            total_indices  = len(_INDEX_MAP)
+            n_sec_labels   = len({l for ls in _SECTOR_MAP.values() for l in ls})
+            print(f"  ✅ Indices loaded : {total_indices} indices, "
+                  f"{sum(len(v) for v in _INDEX_MAP.values())} total memberships "
+                  f"← '{LOCAL_INDICES_XLSX}'")
+            print(f"  ✅ Sectors derived: {len(_SECTOR_MAP)} symbols → "
+                  f"{n_sec_labels} unique sector labels (Sectoral+Thematic+Strategy)")
+
+        except ImportError:
+            print("  [!] openpyxl not installed — run: pip install openpyxl")
+        except Exception as e:
+            import traceback
+            print(f"  [!] Error loading '{LOCAL_INDICES_XLSX}': {e}")
+            traceback.print_exc()
+
+    # ── Individual index CSVs from LOCAL_INDICES_DIR (optional) ──────────────
+    csv_loaded = 0
+    if os.path.isdir(LOCAL_INDICES_DIR):
+        for fname in sorted(os.listdir(LOCAL_INDICES_DIR)):
+            if not fname.lower().endswith(".csv"):
+                continue
+            fpath = os.path.join(LOCAL_INDICES_DIR, fname)
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as f:
+                    raw = f.read().lstrip('\ufeff')
+                reader = csv.reader(io.StringIO(raw))
+                rows_csv = [tuple(r) for r in reader]
+                _, symbols = _parse_index_symbols(rows_csv)
+                if not symbols:
+                    continue
+                base     = re.sub(r'^ind_',  '', os.path.splitext(fname)[0], flags=re.IGNORECASE)
+                base     = re.sub(r'list$',  '', base, flags=re.IGNORECASE)
+                idx_name = re.sub(r'_', ' ', base).strip().upper()
+                if idx_name not in _INDEX_MAP:
+                    _INDEX_MAP[idx_name] = symbols
+                    csv_loaded += 1
+                else:
+                    _INDEX_MAP[idx_name] |= symbols
+            except Exception as e:
+                print(f"  [!] Error reading '{fname}': {e}")
+        if csv_loaded:
+            print(f"  ✅ Indices CSVs  : +{csv_loaded} extra indices from '{LOCAL_INDICES_DIR}'")
+
+    total = len(_INDEX_MAP)
+    if total <= 1:
+        print(f"  ⚠️  Only built-in NIFTY50 loaded. "
+              f"Place xlsx at: {os.path.abspath(LOCAL_INDICES_XLSX)}")
+    else:
+        print(f"  📊 _INDEX_MAP: {total} indices | _SECTOR_MAP: {len(_SECTOR_MAP)} symbols")
 def _parse_nse_csv(text: str, series_filters: list[str], is_sme: bool = False) -> list[str]:
     import re
     
@@ -1021,6 +1436,7 @@ def _parse_nse_csv(text: str, series_filters: list[str], is_sme: bool = False) -
 def load_universe() -> list[str]:
     global _CACHE
     _populate_indices()          # Populate index membership mapping
+    _load_fo_list()              # Load F&O eligible symbols
     _CACHE = _load_cache_v2()   # Smart v2 cache (migrates old format automatically)
 
     all_tickers = []
@@ -1144,6 +1560,11 @@ def analyze_stock(ticker: str) -> dict | None:
         sma_m  = rsi_m.rolling(RSI_SMA_P).mean()
         ml_m, ms_m, mh_m = calc_macd(mo["Close"], MACD_F, MACD_S, MACD_SIG_P)
         cci_m  = calc_cci(mo["High"], mo["Low"], mo["Close"], CCI_P)
+
+        # ── Explosive breakout indicators (daily) ─────────────────────────
+        bb_upper_s, bb_mid_s, bb_lower_s = calc_bb(df["Close"], 20, 2.0)
+        mfi_d   = calc_mfi(df["High"], df["Low"], df["Close"], df["Volume"], 14)
+        cci_200 = calc_cci(df["High"], df["Low"], df["Close"], 200)
     except Exception as exc:
         log_error(ticker, company, "INDICATORS", exc)
         return None
@@ -1166,6 +1587,27 @@ def analyze_stock(ticker: str) -> dict | None:
         v_h52   = float(df["Close"].rolling(252).max().iloc[-1])
         v_l52   = float(df["Close"].rolling(252).min().iloc[-1])
         v_d52   = round((v_close / v_h52 - 1) * 100, 1)
+
+        # ── Explosive breakout feature extraction ─────────────────────────
+        v_bb_upper = f(bb_upper_s)
+        v_bb_mid   = f(bb_mid_s)
+        v_bb_lower = f(bb_lower_s)
+        v_mfi      = round(f(mfi_d), 1)
+        v_cci_200  = round(f(cci_200), 1)
+        # BB % position: 0=at lower, 100=at upper, >100=above upper
+        v_bb_pct = round(
+            (v_close - v_bb_lower) / (v_bb_upper - v_bb_lower) * 100, 1
+        ) if v_bb_upper > v_bb_lower else 50.0
+        # BB upper slope over last 5 days (% change): steep = explosive
+        _bb5 = float(bb_upper_s.iloc[-5]) if len(bb_upper_s) >= 5 else v_bb_upper
+        v_bb_slope = round((v_bb_upper / _bb5 - 1) * 100, 2) if _bb5 > 0 else 0.0
+        # MACD histogram today vs yesterday
+        v_mh_d      = f(mh_d)
+        v_mh_d_prev = float(mh_d.iloc[-2]) if len(mh_d) >= 2 else 0.0
+        # Volume ratio: today / 20-day avg
+        _vol_today = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else 0.0
+        _vol_avg20 = float(df["Volume"].rolling(20).mean().iloc[-1]) if "Volume" in df.columns else 1.0
+        v_vol_ratio = round(_vol_today / (_vol_avg20 + 1), 1)
 
         # ── All-Time High (ATH) — uses High column for true price extreme ────
         ath_price    = float(df["High"].max())
@@ -1234,6 +1676,11 @@ def analyze_stock(ticker: str) -> dict | None:
             v_rsi_d, v_sma_d, v_rsi_w, v_sma_w, v_rsi_m, v_sma_m,
             v_ml_d, v_ms_d, v_cci, fresh_d, fresh_w)
         phase  = detect_phase(v_rsi_d, v_rsi_w, v_rsi_m, v_ml_d, v_ms_d, score)
+
+        # ── Explosive breakout score ───────────────────────────────────────
+        explosive_score, explosive_signals = compute_explosive_score(
+            v_rsi_d, v_vol_ratio, v_close, v_bb_upper, v_bb_slope,
+            v_mh_d, v_mh_d_prev, v_mfi, v_cci_200, v_donch_d)
         signal, sig_cls = signal_label(score, phase, fresh_d, fresh_w,
                                         v_rsi_d, v_rsi_w, v_rsi_m,
                                         v_sma_d, v_sma_w, v_sma_m)
@@ -1300,6 +1747,18 @@ def analyze_stock(ticker: str) -> dict | None:
         "hist_sigs": hist_sigs,
         "ath_price": round(ath_price, 2), "ath_date": ath_date_str,
         "ath_pct": ath_pct, "is_ath": is_ath, "ath_time_str": ath_time_str,
+        # ── Explosive breakout fields ──────────────────────────────────────
+        "explosive_score":   explosive_score,
+        "explosive_signals": explosive_signals,
+        "vol_ratio":  v_vol_ratio,
+        "bb_upper":   round(v_bb_upper, 2),
+        "bb_mid":     round(v_bb_mid, 2),
+        "bb_lower":   round(v_bb_lower, 2),
+        "bb_pct":     v_bb_pct,
+        "bb_slope":   v_bb_slope,
+        "mfi":        v_mfi,
+        "cci_200":    v_cci_200,
+        "macd_hist":  round(v_mh_d, 4),
         # raw series — used for chart only, stripped before HTML table
         "_df": df, "_rsi_d": rsi_d, "_sma_d": sma_d,
         "_rsi_w_daily": rsi_w.reindex(df.index, method="ffill"),
@@ -1313,7 +1772,9 @@ def analyze_stock(ticker: str) -> dict | None:
         "rank_univ_pos": 0,    "rank_univ_of": 0,
         "is_nifty50": False,
         "is_sme": is_sme_stock(ticker),
-        "sector": get_sector(ticker) or "Unknown",
+        "is_fo":  is_fo_stock(ticker),
+        "sectors": get_sector(ticker),             # list: all Sectoral/Thematic/Strategy memberships
+        "sector": get_sector(ticker)[0] if get_sector(ticker) else "Unknown",  # primary (first) for display
         "indices": get_indices(ticker),
         "marketcap": get_marketcap(ticker),
     }
@@ -1325,6 +1786,8 @@ def analyze_stock(ticker: str) -> dict | None:
 
 def generate_chart(data: dict) -> str:
     """Generate a chart PNG file and return its relative path, or '' on error."""
+    import matplotlib
+    matplotlib.use("Agg")   # non-interactive backend — no GUI thread overhead
     ticker  = data["ticker"]
     company = data["company"]
     try:
@@ -1346,7 +1809,7 @@ def generate_chart(data: dict) -> str:
         GOLD="#ffd700"; CYAN="#00d4ff"; PURPLE="#b39ddb"; ORANGE="#ff9800"
         GREY="#30363d"; TXT="#c9d1d9"; FIB_EXT="#4caf50"; FIB_RET="#ff7043"
 
-        fig = plt.figure(figsize=(20, 12), facecolor=BG)  # larger canvas for better clarity
+        fig = plt.figure(figsize=(14, 8), facecolor=BG)
         fig.suptitle(
             f"{ticker} — {data['company']}  |  ₹{data['close']:,.2f}  "
             f"|  {data['phase']}  |  {data['signal']}  |  Score {data['score']}/21  "
@@ -1373,15 +1836,18 @@ def generate_chart(data: dict) -> str:
             ax.set_xticklabels([] if ax != axes[-1] else tlbl,
                                rotation=30, ha="right", fontsize=8, fontweight="bold")
 
-        # Panel 1: Candlestick
+        # Panel 1: Candlestick (vectorised — no iterrows)
         ax1 = axes[0]
-        for i, (_, row) in enumerate(df.iterrows()):
-            up  = float(row["Close"]) >= float(row["Open"])
-            col = GREEN if up else RED
-            ax1.plot([i, i], [float(row["Low"]), float(row["High"])], color=col, lw=1.2, zorder=2)
-            ax1.bar(i, abs(float(row["Close"]) - float(row["Open"])),
-                    bottom=min(float(row["Open"]), float(row["Close"])),
-                    color=col, width=0.75, linewidth=1.2, edgecolor=col, zorder=3)
+        _o = df["Open"].values.astype(float)
+        _h = df["High"].values.astype(float)
+        _l = df["Low"].values.astype(float)
+        _c = df["Close"].values.astype(float)
+        _up = _c >= _o
+        _cols = [GREEN if u else RED for u in _up]
+        ax1.vlines(idx[_up],  _l[_up],  _h[_up],  colors=GREEN, lw=1.2, zorder=2)
+        ax1.vlines(idx[~_up], _l[~_up], _h[~_up], colors=RED,   lw=1.2, zorder=2)
+        ax1.bar(idx[_up],   _c[_up] -_o[_up],  bottom=_o[_up],  color=GREEN, width=0.75, linewidth=0, zorder=3)
+        ax1.bar(idx[~_up],  _o[~_up]-_c[~_up], bottom=_c[~_up], color=RED,   width=0.75, linewidth=0, zorder=3)
         ax1.axhline(data["close"], color=GOLD, lw=1.5, linestyle="--", alpha=0.8, label="Current")
         fib_col = FIB_EXT if data["fib_type"] == "EXTENSION" else FIB_RET
         for lbl, level in data["fib_levels"].items():
@@ -1404,9 +1870,9 @@ def generate_chart(data: dict) -> str:
         # Panel 2: Volume
         ax2 = axes[1]
         vol_avg = pd.Series(df["Volume"].values).rolling(20).mean().values
-        for i, (_, row) in enumerate(df.iterrows()):
-            col = GREEN if float(row["Close"]) >= float(row["Open"]) else RED
-            ax2.bar(i, float(row["Volume"]), color=col, width=0.75, alpha=0.75, linewidth=0.8, edgecolor=col)
+        _vol = df["Volume"].values.astype(float)
+        ax2.bar(idx[_up],  _vol[_up],  color=GREEN, width=0.75, alpha=0.75, linewidth=0)
+        ax2.bar(idx[~_up], _vol[~_up], color=RED,   width=0.75, alpha=0.75, linewidth=0)
         ax2.plot(idx, vol_avg, color=GOLD, lw=2.0, label="Vol MA(20)", zorder=5)
         ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.1f}M"))
         ax2.set_ylabel("Volume", color=TXT, fontsize=10, fontweight="bold")
@@ -1433,8 +1899,9 @@ def generate_chart(data: dict) -> str:
         # Panel 4: MACD
         ax4 = axes[3]
         ax4.axhline(0, color=GREY, lw=1.5, alpha=0.7)
-        ax4.bar(idx, macd_h, color=[GREEN if v >= 0 else RED for v in macd_h],
-                width=0.75, alpha=0.75, linewidth=0.8, edgecolor=[GREEN if v >= 0 else RED for v in macd_h])
+        _mpos = np.array(macd_h) >= 0
+        ax4.bar(idx[_mpos],  np.array(macd_h)[_mpos],  color=GREEN, width=0.75, alpha=0.75, linewidth=0)
+        ax4.bar(idx[~_mpos], np.array(macd_h)[~_mpos], color=RED,   width=0.75, alpha=0.75, linewidth=0)
         ax4.plot(idx, macd_l, color=CYAN,   lw=2.0, label=f"MACD {data['macd_l']:.3f}", zorder=4)
         ax4.plot(idx, macd_s, color=ORANGE, lw=1.8, linestyle="--",
                  label=f"Signal {data['macd_s']:.3f}", zorder=4)
@@ -1446,8 +1913,9 @@ def generate_chart(data: dict) -> str:
         ax5.axhline(100,  color=RED,   lw=1.5, linestyle="--", alpha=0.7)
         ax5.axhline(0,    color=GREY,  lw=1.2, alpha=0.6)
         ax5.axhline(-100, color=GREEN, lw=1.5, linestyle="--", alpha=0.7)
-        ax5.bar(idx, cci, color=[GREEN if v >= 0 else RED for v in cci],
-                width=0.75, alpha=0.75, linewidth=0.8, edgecolor=[GREEN if v >= 0 else RED for v in cci])
+        _cpos = cci >= 0
+        ax5.bar(idx[_cpos],  cci[_cpos],  color=GREEN, width=0.75, alpha=0.75, linewidth=0)
+        ax5.bar(idx[~_cpos], cci[~_cpos], color=RED,   width=0.75, alpha=0.75, linewidth=0)
         ax5.plot(idx, cci, color=CYAN, lw=2.0, label=f"CCI(20) {data['cci']:.1f}", zorder=4)
         ax5.set_ylabel("CCI(20)", color=TXT, fontsize=10, fontweight="bold")
         ax5.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
@@ -1534,6 +2002,10 @@ a{color:var(--cyan)}
 .app-header{background:#010409;border-bottom:2px solid #21262d;padding:18px 20px 14px}
 .app-header h1{font-size:20px;font-weight:700;color:var(--cyan);letter-spacing:1px;margin:0}
 .subtitle{color:var(--sub);font-size:11.5px;margin-top:4px}
+.nav-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.nav-link{display:inline-flex;align-items:center;gap:5px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:4px 14px;font-size:11.5px;font-weight:600;text-decoration:none;transition:all .15s}
+.nav-link:hover{border-color:var(--cyan);color:var(--cyan);background:#002d40}
+.nav-link.active{background:var(--cyan);color:#000;border-color:var(--cyan)}
 .stats-row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
 .stat-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 16px;min-width:100px;flex:1;min-width:90px;max-width:160px}
 .stat-box .val{font-size:22px;font-weight:700}
@@ -1605,6 +2077,7 @@ a{color:var(--cyan)}
          font-size:10px;font-weight:700;border:1px solid #b39ddb44}
 .sme-tag{background:#1a2d0d;color:#4caf50;border-radius:8px;padding:1px 7px;
          font-size:10px;font-weight:700;border:1px solid #4caf5044}
+.fo-tag{background:#1a0d2e;color:#ce93d8;border-radius:8px;padding:1px 7px;font-size:10px;font-weight:700;margin-left:3px}
 .index-tag{background:#0d2440;color:#03a9f4;border-radius:8px;padding:1px 7px;
            font-size:10px;font-weight:700;border:1px solid #03a9f444}
 .sector-tag{background:#2d1a0d;color:#ff9800;border-radius:8px;padding:1px 7px;
@@ -1782,7 +2255,7 @@ _JS = """
 
 // STOCKS, CHART_DIR, PAGE_TBL, PAGE_CARDS are injected by Python above this block
 
-const F = { phase:'all', cap:'all', sector:'all', index:'all', signal:'all', ath:'all', search:'' };
+const F = { phase:'all', cap:'all', sector:'all', index:'all', fo:'all', signal:'all', ath:'all', search:'' };
 let sortKeys   = [];
 let filtered   = [];
 let tblPage    = 0;
@@ -1835,8 +2308,9 @@ function matchStock(s){
     if(!['fresh','nifty50','sme'].includes(F.phase)&&s.phase!==F.phase) return false;
   }
   if(F.cap   !=='all'&&s.cap_cls !==F.cap)    return false;
-  if(F.sector!=='all'&&s.sector  !==F.sector) return false;
+  if(F.sector!=='all'&&!(s.sectors||[]).includes(F.sector)) return false;
   if(F.index !=='all'&&!(s.indices||[]).includes(F.index)) return false;
+  if(F.fo    !=='all'&&((F.fo==='fo'&&!s.is_fo)||(F.fo==='cash'&&s.is_fo))) return false;
   if(F.signal!=='all'&&s.sig_cls !==F.signal) return false;
   if(F.ath!=='all'){
     const p=s.ath_pct;
@@ -1894,6 +2368,17 @@ function rowHTML(s){
   const n50Tag=s.is_nifty50?'<span class="n50-tag">N50</span>':'';
   const smeTag=s.is_sme?'<span class="sme-tag">SME</span>':'';
   const capTag=s.cap_cat!=='Unknown'?`<span class="${s.cap_cls} badge">${s.cap_cat}</span>`:'';
+  // Sector & index tags for Ticker/Company column in table
+  // Sector tags — show ALL sectoral/thematic/strategy memberships (from s.sectors[])
+  const _secList=(s.sectors&&s.sectors.length)?s.sectors:((s.sector&&s.sector!=='Unknown')?[s.sector]:[]);
+  const tblSecTags=_secList.slice(0,2).map(l=>`<span class="sector-tag">${esc(l)}</span>`).join(' ')
+    +(_secList.length>2?` <span class="sector-tag" title="${esc(_secList.slice(2).join(' | '))}">+${_secList.length-2}</span>`:'');
+  // Index tags — up to 3 then +N overflow
+  const _idxList=(s.indices||[]);
+  const tblIdxTags=_idxList.slice(0,3).map(i=>`<span class="index-tag">${esc(i)}</span>`).join(' ')
+    +(_idxList.length>3?` <span class="index-tag" title="${esc(_idxList.slice(3).join(', '))}">+${_idxList.length-3}</span>`:'');
+  // F&O tag
+  const foTag=s.is_fo?'<span class="fo-tag">F&amp;O</span>':'';
   // D-RSI vs SMA
   const rsiCol =s.rsi_d>s.sma_d?'var(--green)':'var(--red)';
   const rsiArr =s.rsi_d>s.sma_d?'▲':'▼';
@@ -1921,6 +2406,9 @@ function rowHTML(s){
   <td><b style="color:var(--cyan)">${esc(s.ticker)}</b> ${frTag}${n50Tag}${smeTag}
       <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div>
       <div style="font-size:10px;color:var(--gold);font-weight:600">${fmtINR(s.close)}</div>
+      ${foTag?`<span style="margin-left:2px">${foTag}</span>`:''}
+      ${tblSecTags?`<div style="margin-top:2px">${tblSecTags}</div>`:''}
+      ${tblIdxTags?`<div style="margin-top:2px">${tblIdxTags}</div>`:''}
       ${_athTag?`<div style="margin-top:3px">${_athTag}</div>`:''}</td>
   <td style="text-align:center">${phaseBadge(s.phase)}</td>
   <td style="text-align:center"><span class="${s.sig_cls}">${esc(s.signal)}</span></td>
@@ -2012,9 +2500,11 @@ function cardSummaryHTML(s,idx){
               +(s.fresh_w?`<span class="fresh-tag">📅 Weekly (${s.fresh_w_bars}w)</span>`:'');
   const n50Tag=s.is_nifty50?'<span class="n50-tag">NIFTY50</span>':'';
   const smeTag=s.is_sme?'<span class="sme-tag">SME</span>':'';
+  const foTagC=s.is_fo?'<span class="fo-tag">F&amp;O</span>':'';
   const capTag=s.cap_cat!=='Unknown'?`<span class="${s.cap_cls}">${s.cap_cat}</span>`:'';
   const idxTags=(s.indices||[]).map(i=>`<span class="index-tag">${esc(i)}</span>`).join(' ');
-  const secTag=(s.sector&&s.sector!=='Unknown')?`<span class="sector-tag">${esc(s.sector)}</span>`:'';
+  const _cSecList=(s.sectors&&s.sectors.length)?s.sectors:((s.sector&&s.sector!=='Unknown')?[s.sector]:[]);
+  const secTag=_cSecList.map(l=>`<span class="sector-tag">${esc(l)}</span>`).join(' ');
   const _ath=athTag(s);
   return `<details class="stock-card" data-idx="${idx}">
   <summary>
@@ -2024,7 +2514,7 @@ function cardSummaryHTML(s,idx){
     ${phaseBadge(s.phase)}
     <span class="${s.sig_cls}" style="font-weight:700">${esc(s.signal)}</span>
     <span class="card-score">Score ${s.score}/21</span>
-    ${frTags}${n50Tag}${smeTag}${capTag}${idxTags}${secTag}${_ath?_ath:''}
+    ${frTags}${n50Tag}${smeTag}${foTagC}${capTag}${idxTags}${secTag}${_ath?_ath:''}
     <span style="margin-left:auto;color:var(--sub);font-size:11px;text-align:right">
       D ${s.rsi_d} W ${s.rsi_w} M ${s.rsi_m} RSI
       &nbsp;|&nbsp; N50: ${rankPill(s.rank_nifty50,s.rank_nifty50_pos,s.rank_nifty50_of)}
@@ -2268,6 +2758,7 @@ function onDropChange(){
   F.cap   =document.getElementById('capSel').value;
   F.sector=document.getElementById('secSel').value;
   F.index =document.getElementById('idxSel').value;
+  F.fo    =document.getElementById('foSel')?.value||'all';
   F.signal=document.getElementById('sigSel').value;
   F.ath   =document.getElementById('athSel').value;
   applyFilters();
@@ -2278,8 +2769,8 @@ function onSearch(v){
   _st=setTimeout(()=>{ F.search=v.trim(); applyFilters(); },220);
 }
 function clearAll(){
-  Object.assign(F,{phase:'all',cap:'all',sector:'all',index:'all',signal:'all',ath:'all',search:''});
-  ['capSel','secSel','idxSel','sigSel','athSel'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='all';});
+  Object.assign(F,{phase:'all',cap:'all',sector:'all',index:'all',fo:'all',signal:'all',ath:'all',search:''});
+  ['capSel','secSel','idxSel','foSel','sigSel','athSel'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='all';});
   const si=document.getElementById('searchInp');if(si)si.value='';
   document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active'));
   document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');
@@ -2296,8 +2787,9 @@ function renderChips(){
   const chips=[];
   if(F.phase!=='all')  chips.push([`Phase: ${F.phase}`,()=>{F.phase='all';document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active'));document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');}]);
   if(F.cap!=='all')    chips.push([CAP_LABELS[F.cap]||F.cap,()=>{F.cap='all';document.getElementById('capSel').value='all';}]);
-  if(F.sector!=='all') chips.push([F.sector,()=>{F.sector='all';document.getElementById('secSel').value='all';}]);
-  if(F.index!=='all')  chips.push([F.index,()=>{F.index='all';document.getElementById('idxSel').value='all';}]);
+  if(F.sector!=='all') chips.push([`🏭 ${F.sector}`,()=>{F.sector='all';document.getElementById('secSel').value='all';}]);
+  if(F.index!=='all')  chips.push([`📊 ${F.index}`,()=>{F.index='all';document.getElementById('idxSel').value='all';}]);
+  if(F.fo!=='all')     chips.push([`🔮 ${F.fo==='fo'?'F&O Only':'Cash Only'}`,()=>{F.fo='all';const el=document.getElementById('foSel');if(el)el.value='all';}]);
   if(F.signal!=='all') chips.push([SIG_LABELS[F.signal]||F.signal,()=>{F.signal='all';document.getElementById('sigSel').value='all';}]);
   if(F.ath!=='all')    chips.push([ATH_LABELS[F.ath]||F.ath,()=>{F.ath='all';document.getElementById('athSel').value='all';}]);
   if(F.search)         chips.push([`"${F.search}"`,()=>{F.search='';document.getElementById('searchInp').value='';}]);
@@ -2516,9 +3008,11 @@ def build_summary_table() -> str:
     # ── Tooltip content for each column ──────────────────────────────────────
     TIP_TICKER = (
         "<b>Ticker / Company</b><br>NSE stock symbol and company name. "
-        "Tags show FRESH breakout, NIFTY50 membership, SME, and market-cap category."
+        "Tags show FRESH breakout, NIFTY50 membership, SME, market-cap category, "
+        "sector/industry (orange), and index memberships (blue)."
         "<div class='tip-action'>"
-        "<span class='tip-buy'>▲ Sort A→Z</span> to scan alphabetically, or use the search box to jump to any stock."
+        "<span class='tip-buy'>▲ Sort A→Z</span> to scan alphabetically, or use the search box to jump to any stock.<br>"
+        "Use the <b>🏭 Sector</b> and <b>📊 Index</b> filters above to narrow by industry or index membership."
         "</div>"
     )
 
@@ -2746,7 +3240,7 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
 
     if has_chart:
         chart_html = (f'<div class="chart-wrap">'
-                      f'<img class="lazy-chart" data-src="{CHART_OUTPUT_DIR}/{d["ticker"]}.png" '
+                      f'<img class="lazy-chart" data-src="{GITHUB_CHARTS_BASE}/{d["ticker"]}.png" '
                       f'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" '
                       f'alt="{d["ticker"]} chart" loading="lazy">'
                       f'</div>')
@@ -2786,13 +3280,72 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
 </details>"""
 
 
-def _build_filter_options(all_results: list[dict]) -> tuple[str, str]:
-    """Build sector and index <option> lists for filter dropdowns."""
-    sectors = sorted({d["sector"] for d in all_results if d.get("sector") and d["sector"] != "Unknown"})
-    indices = sorted({idx for d in all_results for idx in (d.get("indices") or [])})
-    sec_opts = "".join(f'<option value="{s}">{s}</option>' for s in sectors)
-    idx_opts = "".join(f'<option value="{i}">{i}</option>' for i in indices)
-    return sec_opts, idx_opts
+def _build_filter_options(all_results: list[dict]) -> tuple[str, str, str]:
+    """
+    Build sector, index, and F&O <option> lists for filter dropdowns.
+
+    Sectors : every Sectoral/Thematic/Strategy index label a stock belongs to
+              (s.sectors[] list) — so "NIFTY CPSE - Thematic" appears as its
+              own filterable option even if a stock also has a Sectoral label.
+    Indices : all 52 indices from _INDEX_MAP with analysed-stock counts.
+    F&O     : simple yes/no — foSel dropdown has just two options beyond "All".
+    """
+    import html as _html
+
+    analyzed_tickers = {d["ticker"] for d in all_results}
+
+    # ── Fix sectors / indices in-place (safety net for late xlsx load) ───────
+    for d in all_results:
+        ticker = d.get("ticker", "")
+        if not ticker:
+            continue
+        # Re-derive sectors list from _SECTOR_MAP if missing/empty
+        if not d.get("sectors"):
+            raw = _SECTOR_MAP.get(ticker, [])
+            d["sectors"] = raw if isinstance(raw, list) else ([raw] if raw else [])
+        # Keep primary sector for display (first in sorted list)
+        if not d.get("sector") or d["sector"] == "Unknown":
+            d["sector"] = d["sectors"][0] if d["sectors"] else "Unknown"
+        # Re-derive indices from _INDEX_MAP
+        full_indices = [idx for idx, syms in _INDEX_MAP.items() if ticker in syms]
+        if full_indices:
+            d["indices"] = sorted(full_indices)
+        # Re-derive is_fo
+        if not d.get("is_fo"):
+            d["is_fo"] = ticker in _FO_SET
+
+    # ── Sectors (from s.sectors[] list — each label is a separate option) ────
+    sec_counts: dict[str, int] = {}
+    for d in all_results:
+        for lbl in (d.get("sectors") or []):
+            if lbl:
+                sec_counts[lbl] = sec_counts.get(lbl, 0) + 1
+    sec_opts = "".join(
+        f'<option value="{_html.escape(s)}">{_html.escape(s)} ({c})</option>'
+        for s, c in sorted(sec_counts.items()) if c > 0
+    )
+
+    # ── Indices (from _INDEX_MAP — all 52, with analysed counts) ─────────────
+    idx_counts: dict[str, int] = {}
+    for idx_name, syms in _INDEX_MAP.items():
+        cnt = sum(1 for t in syms if t in analyzed_tickers)
+        if cnt > 0:
+            idx_counts[idx_name] = cnt
+    for d in all_results:                          # belt-and-suspenders
+        for i in (d.get("indices") or []):
+            if i not in idx_counts:
+                idx_counts[i] = 1
+    idx_opts = "".join(
+        f'<option value="{_html.escape(i)}">{_html.escape(i)} ({c})</option>'
+        for i, c in sorted(idx_counts.items())
+    )
+
+    # ── F&O count (for badge on "All F&O" option) ────────────────────────────
+    # fo_opts is just a count — the actual options are hardcoded in HTML template
+    n_fo = sum(1 for d in all_results if d.get("is_fo"))
+    fo_opts = str(n_fo)   # passed as {fo_opts} into the template
+
+    return sec_opts, idx_opts, fo_opts
 
 
 _HTML_FIELDS = {
@@ -2800,10 +3353,13 @@ _HTML_FIELDS = {
     'rsi_m','sma_m','macd_l','macd_s','macd_l_w','macd_s_w','macd_l_m','macd_s_m',
     'cci','cci_w','cci_m','atr_sl','swing_sl','r_sl_pct','s_sl_pct','entry_note',
     'sell_conds','score','phase','signal','sig_cls','fresh_d','fresh_d_bars','fresh_w',
-    'fresh_w_bars','donchian_d','donchian_w','donchian_m','is_nifty50','is_sme','sector','indices','marketcap','cap_cat','cap_cls',
+    'fresh_w_bars','donchian_d','donchian_w','donchian_m','is_nifty50','is_sme','is_fo','sector','sectors','indices','marketcap','cap_cat','cap_cls',
     'rank_nifty50','rank_nifty50_pos','rank_nifty50_of','rank_universe','rank_univ_pos',
     'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','has_chart',
-    'ath_price','ath_date','ath_pct','is_ath','ath_time_str'
+    'ath_price','ath_date','ath_pct','is_ath','ath_time_str',
+    'explosive_score','explosive_signals','vol_ratio',
+    'bb_upper','bb_mid','bb_lower','bb_pct','bb_slope',
+    'mfi','cci_200','macd_hist'
 }
 
 
@@ -2811,7 +3367,7 @@ def _html_safe_stock(d: dict) -> dict:
     rec = {k: d[k] for k in _HTML_FIELDS if k in d}
     # Keep chart file reference (don't embed base64 — charts loaded on demand from file)
     if d.get('has_chart'):
-        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{d['ticker']}.png").replace("\\", "/")
+        chart_path = f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
         rec['chart_path'] = chart_path
     return rec
 
@@ -2840,7 +3396,10 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
     n_ath_20   = sum(1 for d in all_results if not d.get("is_ath") and d.get("ath_pct") is not None and d["ath_pct"] >= -20)
     n_ath_far  = sum(1 for d in all_results if d.get("ath_pct") is not None and d["ath_pct"] < -20)
 
-    sec_opts, idx_opts = _build_filter_options(all_results)
+    sec_opts, idx_opts, fo_opts = _build_filter_options(all_results)
+    n_sectors = sec_opts.count('<option')
+    n_indices = idx_opts.count('<option')
+    n_fo      = int(fo_opts)
 
     # ── Add computed display fields + has_chart to each record ────────────────
     chart_tickers = set(chart_data.keys())
@@ -2876,12 +3435,17 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
           <option value="cap-micro">🟠 Micro Cap (&lt;₹500 Cr)</option>
         </select>
         <select id="secSel" class="filter-select" onchange="onDropChange()">
-          <option value="all">🏭 All Sectors / Industries</option>
+          <option value="all">🏭 All Sectors / Industries ({n_sectors})</option>
           {sec_opts}
         </select>
         <select id="idxSel" class="filter-select" onchange="onDropChange()">
-          <option value="all">📊 All Indices</option>
+          <option value="all">📊 All Indices ({n_indices})</option>
           {idx_opts}
+        </select>
+        <select id="foSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">🔮 All F&amp;O / Cash ({n_fo})</option>
+          <option value="fo">🔮 F&amp;O Stocks ({n_fo})</option>
+          <option value="cash">💵 Cash Only</option>
         </select>
         <select id="sigSel" class="filter-select" onchange="onDropChange()">
           <option value="all">📶 All Signals</option>
@@ -2944,6 +3508,11 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
       Ranked vs Nifty50 &amp; All NSE &nbsp;|&nbsp;
       {len(chart_data)} charts · virtual render (no browser hang)
     </div>
+    <div class="nav-links">
+      <a class="nav-link active" href="/">📊 Full Report</a>
+      <a class="nav-link" href="/ath">🏆 ATH Breakout</a>
+      <a class="nav-link" href="/rocket">🚀 Rocket Scanner</a>
+    </div>
     {stat_boxes}
   </div>
 
@@ -2970,7 +3539,7 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
 
   <script>
 const STOCKS={stocks_json};
-const CHART_DIR={json.dumps(CHART_OUTPUT_DIR)};
+const CHART_DIR={json.dumps(GITHUB_CHARTS_BASE)};
 const PAGE_TBL={PAGE_TBL};
 const PAGE_CARDS={PAGE_CARDS};
 {_JS}
@@ -3082,7 +3651,7 @@ def main(force_charts: bool = False):
 
     if stale:
         workers = min(CHART_WORKERS, len(stale))
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(_generate_chart_worker, d): (d["ticker"], hash_val, path)
                        for d, hash_val, path in stale}
             completed = 0

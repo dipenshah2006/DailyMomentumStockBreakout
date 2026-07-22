@@ -7,3 +7,8 @@ openpyxl>=3.1.0
 flask>=3.0.0
 APScheduler>=3.10.0
 pytz>=2024.1
+beautifulsoup4
+gunicorn
+ta-lib-easy
+plotly>=5.18.0
+kaleido>=0.2.1

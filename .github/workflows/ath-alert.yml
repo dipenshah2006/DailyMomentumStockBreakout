@@ -1,0 +1,101 @@
+name: NSE ATH Watchlist Alert
+
+on:
+  schedule:
+    # Runs hourly during NSE market hours (9:15 AM – 3:30 PM IST = 3:45 AM – 10:00 AM UTC)
+    # Mon–Fri only (no markets on weekends)
+    - cron: '45 3 * * 1-5'    #  9:15 AM IST
+    - cron: '45 4 * * 1-5'    # 10:15 AM IST
+    - cron: '45 5 * * 1-5'    # 11:15 AM IST
+    - cron: '45 6 * * 1-5'    # 12:15 PM IST
+    - cron: '45 7 * * 1-5'    #  1:15 PM IST
+    - cron: '45 8 * * 1-5'    #  2:15 PM IST
+    - cron: '45 9 * * 1-5'    #  3:15 PM IST
+  workflow_dispatch:            # manual trigger for testing
+    inputs:
+      dry_run:
+        description: 'Dry run — print alerts, do NOT send email'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: ath-alert
+  cancel-in-progress: true
+
+jobs:
+  check-ath:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # ── 3. Install dependencies ──────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            "yfinance>=0.2.54" \
+            "pandas>=2.0.0" \
+            "numpy>=1.24.0"
+
+      # ── 4. Run ATH Alert checker ─────────────────────────────────────────────
+      - name: Check watchlist for new ATHs
+        id: ath_check
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python ath_alert.py
+
+      # ── 5. Send alert email (only if new ATHs found) ─────────────────────────
+      - name: Send ATH Alert email
+        if: steps.ath_check.outcome == 'success'
+        env:
+          GMAIL_USERNAME:     dipenshah2006@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_SEND_MODE:    bcc
+          EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          EMAIL_BCC_BATCH:    '100'
+          EMAIL_BODY_FILE:    ath_alert.html
+          EMAIL_SUBJECT_FILE: ath_alert_subject.txt
+        run: |
+          COUNT=$(cat ath_alert_count.txt 2>/dev/null || echo "0")
+          if [ "$COUNT" = "0" ]; then
+            echo "✅ No new ATHs detected — skipping email"
+            exit 0
+          fi
+          TIME=$(TZ="Asia/Kolkata" date +'%H:%M IST' 2>/dev/null || date +'%H:%M')
+          DATE=$(date +'%d %b %Y')
+          echo "🏆 NEW ATH ALERT — ${COUNT} stock(s) hit all-time high! ${DATE} ${TIME}" > ath_alert_subject.txt
+          echo "Sending ATH alert for ${COUNT} stock(s)…"
+          python send_report_email.py
+
+      # ── 6. Upload alert as artifact ──────────────────────────────────────────
+      - name: Upload alert artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ath-alert-${{ github.run_number }}
+          path: |
+            ath_alert.html
+            ath_alert_count.txt
+            ath_alert_fired_*.txt
+          retention-days: 7
