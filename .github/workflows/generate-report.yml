@@ -101,6 +101,15 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      - name: Upload RSI Charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsi-charts
+          path: charts/
+          retention-days: 3
+          if-no-files-found: warn
+
       - name: Upload error log
         if: failure()
         uses: actions/upload-artifact@v4
@@ -466,6 +475,13 @@ jobs:
           path: .
         continue-on-error: true
 
+      - name: Download RSI Charts
+        uses: actions/download-artifact@v4
+        with:
+          name: rsi-charts
+          path: charts
+        continue-on-error: true
+
       - name: Download ATH HTML
         uses: actions/download-artifact@v4
         with:
@@ -536,6 +552,15 @@ jobs:
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
           [ -f "multibagger_report.html"] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
+
+          # Charts — copy from repo checkout (committed PNGs) merged with
+          # any fresh PNGs downloaded from the rsi-charts artifact above.
+          if [ -d "charts" ]; then
+            cp -r charts _site/charts
+            echo "✅ Charts → _site/charts/ ($(ls charts/*.png 2>/dev/null | wc -l) PNGs)"
+          else
+            echo "⚠️  No charts/ folder found"
+          fi
 
           ls -lh _site/
 
