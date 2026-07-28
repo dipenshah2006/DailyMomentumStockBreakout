@@ -358,16 +358,6 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-<<<<<<< HEAD
-  # ════════════════════════════════════════════════════════════════
-  #  6. ASX Screener
-  #     Scans NSE + ASX stocks; can take several hours.
-  # ════════════════════════════════════════════════════════════════
-  asx-report:
-    name: ASX Screener
-    runs-on: ubuntu-latest
-    timeout-minutes: 330
-=======
   # ═══════════════════════════════════════════════════════════════
   #  6. ASX Screener
   #     Scans ASX stocks; can take several hours.
@@ -376,35 +366,20 @@ jobs:
     name: ASX Screener
     runs-on: ubuntu-latest
     timeout-minutes: 360
->>>>>>> origin/main
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-<<<<<<< HEAD
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-=======
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
->>>>>>> origin/main
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-<<<<<<< HEAD
-          python -m pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
-=======
           python -m pip install yfinance pandas numpy matplotlib requests openpyxl
->>>>>>> origin/main
 
       - name: Create directories
         run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/asx
@@ -436,50 +411,28 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-<<<<<<< HEAD
-  # ════════════════════════════════════════════════════════════════
-=======
   # ═══════════════════════════════════════════════════════════════
->>>>>>> origin/main
   #  7. USA / NYSE Screener
   #     Scans NYSE stocks; can take several hours.
   # ═══════════════════════════════════════════════════════════════
   usa-report:
     name: USA / NYSE Screener
     runs-on: ubuntu-latest
-<<<<<<< HEAD
-    timeout-minutes: 330
-=======
     timeout-minutes: 360
->>>>>>> origin/main
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-<<<<<<< HEAD
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-=======
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
->>>>>>> origin/main
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-<<<<<<< HEAD
-          python -m pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
-=======
           python -m pip install yfinance pandas numpy matplotlib requests openpyxl
->>>>>>> origin/main
 
       - name: Create directories
         run: mkdir -p USAs/charts
