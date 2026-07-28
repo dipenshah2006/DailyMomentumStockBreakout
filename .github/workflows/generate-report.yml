@@ -453,6 +453,15 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      - name: Upload USA Charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usa-charts
+          path: USAs/charts/
+          retention-days: 3
+          if-no-files-found: warn
+
   # ═══════════════════════════════════════════════════════════════
   #  8. Deploy & Send Emails
   #     Runs after ALL 7 report jobs — whether they pass or fail.
@@ -548,6 +557,13 @@ jobs:
         with:
           name: usa-html
           path: USAs
+        continue-on-error: true
+
+      - name: Download USA Charts
+        uses: actions/download-artifact@v4
+        with:
+          name: usa-charts
+          path: charts
         continue-on-error: true
 
       - name: Prepare GitHub Pages output
