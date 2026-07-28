@@ -350,13 +350,13 @@ jobs:
           if-no-files-found: warn
 
   # ═══════════════════════════════════════════════════════════════
-  #  6. ASX Screener — self-hosted runner (no timeout limit)
-  #     Scans NSE + ASX stocks; can take several hours.
+  #  6. ASX Screener
+  #     Scans ASX stocks; can take several hours.
   # ═══════════════════════════════════════════════════════════════
   asx-report:
     name: ASX Screener
-    runs-on: self-hosted
-    # No timeout-minutes — self-hosted runners have no GitHub-imposed limit
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -403,13 +403,13 @@ jobs:
           if-no-files-found: warn
 
   # ═══════════════════════════════════════════════════════════════
-  #  7. USA / NYSE Screener — self-hosted runner (no timeout limit)
+  #  7. USA / NYSE Screener
   #     Scans NYSE stocks; can take several hours.
   # ═══════════════════════════════════════════════════════════════
   usa-report:
     name: USA / NYSE Screener
-    runs-on: self-hosted
-    # No timeout-minutes — self-hosted runners have no GitHub-imposed limit
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
