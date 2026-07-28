@@ -502,6 +502,30 @@ def status():
     })
 
 
+@app.route('/run-multibagger', methods=['POST', 'GET'])
+def trigger_multibagger():
+    """Trigger multibagger_report.py in a background thread."""
+    def _run():
+        try:
+            log.info('Starting multibagger report…')
+            result = subprocess.run(
+                [sys.executable, '-u', 'multibagger_report.py'],
+                capture_output=True, text=True, timeout=7200
+            )
+            if result.returncode == 0:
+                log.info('Multibagger report completed successfully.')
+                log.info(result.stdout[-2000:] if result.stdout else '(no output)')
+            else:
+                log.error(f'Multibagger report failed:\n{result.stderr[-2000:]}')
+        except subprocess.TimeoutExpired:
+            log.error('Multibagger report timed out after 2 hours.')
+        except Exception as e:
+            log.error(f'Multibagger report error: {e}')
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return jsonify({'status': 'started', 'message': 'Multibagger report running in background — check /multibagger in a few minutes.'})
+
+
 @app.route('/multibagger')
 def multibagger():
     path = 'multibagger_report.html'

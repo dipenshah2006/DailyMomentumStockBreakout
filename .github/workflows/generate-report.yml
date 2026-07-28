@@ -35,9 +35,6 @@ concurrency:
   group: github-pages
   cancel-in-progress: false
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 # ── Each report runs in its own parallel job — a failure or timeout
 # ── in one does NOT affect the others. The deploy job always runs
 # ── at the end to publish whatever succeeded.
@@ -65,9 +62,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Restore data cache
         uses: actions/cache@v4
@@ -106,6 +101,15 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      - name: Upload RSI Charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsi-charts
+          path: charts/
+          retention-days: 3
+          if-no-files-found: warn
+
       - name: Upload error log
         if: failure()
         uses: actions/upload-artifact@v4
@@ -115,9 +119,9 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   #  2. ATH Breakout Report
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   ath-report:
     name: ATH Breakout Report
     runs-on: ubuntu-latest
@@ -136,7 +140,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0"
+          pip install yfinance pandas numpy
 
       # Restore RSI cache (if available) so ath_report.py can reuse cached DataFrames.
       # If the cache is absent, ath_report.py falls back to yfinance automatically.
@@ -163,9 +167,9 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   #  3. Rocket Scanner
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   rocket-report:
     name: Rocket Scanner
     runs-on: ubuntu-latest
@@ -184,9 +188,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "matplotlib>=3.7.0" "requests>=2.31.0"
+          pip install yfinance pandas numpy matplotlib requests
 
       # Restore RSI cache and seed rocket_cache.pkl from it.
       # If the RSI cache is absent, seed_shared_cache.py exits cleanly and
@@ -223,9 +225,9 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   #  4. F&O Multi-Indicator Scanner
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   fo-report:
     name: F&O Scanner
     runs-on: ubuntu-latest
@@ -244,9 +246,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       # F&O Scanner natively reads stock_data_cache.pkl (same v2 format as RSI MTF).
       # Restoring it here means F&O skips downloading tickers already cached by RSI.
@@ -275,9 +275,18 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ════════════════════════════════════════════════════════════════
+      - name: Upload F&O Charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fo-charts
+          path: charts/fo/
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════
   #  5. NSE Index Dashboard (Plotly — indices only, fast)
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   index-dashboard:
     name: NSE Index Dashboard
     runs-on: ubuntu-latest
@@ -296,10 +305,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "plotly>=5.18.0" "requests>=2.31.0" "openpyxl>=3.1.0" \
-            "kaleido>=0.2.1"
+          pip install yfinance pandas numpy plotly requests openpyxl kaleido
 
       - name: Create directories
         run: mkdir -p india/NSE/NSECash india/NSE/NseIndice india/NSE/cache IndexDashBoard/cache charts/index
@@ -352,6 +358,7 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+<<<<<<< HEAD
   # ════════════════════════════════════════════════════════════════
   #  6. ASX Screener
   #     Scans NSE + ASX stocks; can take several hours.
@@ -360,23 +367,44 @@ jobs:
     name: ASX Screener
     runs-on: ubuntu-latest
     timeout-minutes: 330
+=======
+  # ═══════════════════════════════════════════════════════════════
+  #  6. ASX Screener
+  #     Scans ASX stocks; can take several hours.
+  # ═══════════════════════════════════════════════════════════════
+  asx-report:
+    name: ASX Screener
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+>>>>>>> origin/main
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+<<<<<<< HEAD
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
+=======
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+>>>>>>> origin/main
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+<<<<<<< HEAD
           python -m pip install \
             "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
             "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+=======
+          python -m pip install yfinance pandas numpy matplotlib requests openpyxl
+>>>>>>> origin/main
 
       - name: Create directories
         run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/asx
@@ -408,31 +436,50 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+<<<<<<< HEAD
   # ════════════════════════════════════════════════════════════════
+=======
+  # ═══════════════════════════════════════════════════════════════
+>>>>>>> origin/main
   #  7. USA / NYSE Screener
   #     Scans NYSE stocks; can take several hours.
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   usa-report:
     name: USA / NYSE Screener
     runs-on: ubuntu-latest
+<<<<<<< HEAD
     timeout-minutes: 330
+=======
+    timeout-minutes: 360
+>>>>>>> origin/main
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+<<<<<<< HEAD
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
+=======
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+>>>>>>> origin/main
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+<<<<<<< HEAD
           python -m pip install \
             "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
             "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+=======
+          python -m pip install yfinance pandas numpy matplotlib requests openpyxl
+>>>>>>> origin/main
 
       - name: Create directories
         run: mkdir -p USAs/charts
@@ -453,12 +500,21 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
-  # ════════════════════════════════════════════════════════════════
+      - name: Upload USA Charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usa-charts
+          path: USAs/charts/
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════
   #  8. Deploy & Send Emails
   #     Runs after ALL 7 report jobs — whether they pass or fail.
   #     Publishes whatever HTML was generated to GitHub Pages,
   #     then sends the appropriate emails.
-  # ════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════
   deploy:
     name: Deploy & Email
     needs: [rsi-report, ath-report, rocket-report, fo-report, index-dashboard, asx-report, usa-report]
@@ -483,9 +539,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
-            "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       # Download each report's HTML (continue-on-error so a missing
       # artifact from a failed job does not abort the deploy step)
@@ -494,6 +548,13 @@ jobs:
         with:
           name: rsi-html
           path: .
+        continue-on-error: true
+
+      - name: Download RSI Charts
+        uses: actions/download-artifact@v4
+        with:
+          name: rsi-charts
+          path: charts
         continue-on-error: true
 
       - name: Download ATH HTML
@@ -517,6 +578,13 @@ jobs:
           path: .
         continue-on-error: true
 
+      - name: Download F&O Charts
+        uses: actions/download-artifact@v4
+        with:
+          name: fo-charts
+          path: charts/fo
+        continue-on-error: true
+
       - name: Download Index Dashboard HTML
         uses: actions/download-artifact@v4
         with:
@@ -536,6 +604,13 @@ jobs:
         with:
           name: usa-html
           path: USAs
+        continue-on-error: true
+
+      - name: Download USA Charts
+        uses: actions/download-artifact@v4
+        with:
+          name: usa-charts
+          path: charts
         continue-on-error: true
 
       - name: Prepare GitHub Pages output
@@ -558,14 +633,23 @@ jobs:
           fi
 
           [ -f "ath_report_NSE.html"    ] && cp ath_report_NSE.html    _site/ath.html            && echo "✅ ATH"             || echo "⚠️  ATH not found"
-          [ -f "rocket_scan_latest.html"] && cp rocket_scan_latest.html _site/rocket.html         && echo "✅ Rocket"          || echo "⚠️  Rocket not found"
+          [ -f "rocket_scan_latest.html" ] && cp rocket_scan_latest.html _site/rocket.html         && echo "✅ Rocket"          || echo "⚠️  Rocket not found"
           [ -f "fo_report.html"         ] && cp fo_report.html          _site/fo.html             && echo "✅ F&O"             || echo "⚠️  F&O not found"
           [ -f "index_analysis.html"    ] && cp index_analysis.html     _site/index-dashboard.html && echo "✅ Index Dashboard" || echo "⚠️  Index Dashboard not found"
           [ -f "asx_report_NSE.html"    ] && cp asx_report_NSE.html     _site/asx.html            && echo "✅ ASX"             || echo "⚠️  ASX not found"
           [ -f "USAs/rsi_mtf_report_NYSE.html" ] && cp USAs/rsi_mtf_report_NYSE.html _site/usa.html && echo "✅ USA/NYSE"      || echo "⚠️  USA/NYSE not found"
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
-          [ -f "multibagger_report.html"] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
+          [ -f "multibagger_report.html" ] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
+
+          # Charts — copy from repo checkout (committed PNGs) merged with
+          # any fresh PNGs downloaded from the rsi-charts artifact above.
+          if [ -d "charts" ]; then
+            cp -r charts _site/charts
+            echo "✅ Charts → _site/charts/ ($(ls charts/*.png 2>/dev/null | wc -l) PNGs)"
+          else
+            echo "⚠️  No charts/ folder found"
+          fi
 
           ls -lh _site/
 
