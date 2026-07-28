@@ -225,6 +225,19 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      # Commit rocket_scan_latest.html back to repo so it survives between
+      # runs and is always available in the checkout during Pages deploy.
+      - name: Commit rocket_scan_latest.html to repo
+        if: steps.run.outcome == 'success'
+        run: |
+          git config user.name  "NSE Bot"
+          git config user.email "bot@noreply"
+          git pull --rebase origin main
+          git add rocket_scan_latest.html
+          git diff --cached --quiet \
+            && echo "No changes in rocket_scan_latest.html — skipping commit" \
+            || (git commit -m "chore: update rocket_scan_latest.html [skip ci]" && git push)
+
   # ═══════════════════════════════════════════════════════════════
   #  4. F&O Multi-Indicator Scanner
   # ═══════════════════════════════════════════════════════════════
