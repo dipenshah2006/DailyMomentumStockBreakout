@@ -554,14 +554,14 @@ jobs:
           fi
 
           [ -f "ath_report_NSE.html"    ] && cp ath_report_NSE.html    _site/ath.html            && echo "✅ ATH"             || echo "⚠️  ATH not found"
-          [ -f "rocket_scan_latest.html"] && cp rocket_scan_latest.html _site/rocket.html         && echo "✅ Rocket"          || echo "⚠️  Rocket not found"
+          [ -f "rocket_scan_latest.html" ] && cp rocket_scan_latest.html _site/rocket.html         && echo "✅ Rocket"          || echo "⚠️  Rocket not found"
           [ -f "fo_report.html"         ] && cp fo_report.html          _site/fo.html             && echo "✅ F&O"             || echo "⚠️  F&O not found"
           [ -f "index_analysis.html"    ] && cp index_analysis.html     _site/index-dashboard.html && echo "✅ Index Dashboard" || echo "⚠️  Index Dashboard not found"
           [ -f "asx_report_NSE.html"    ] && cp asx_report_NSE.html     _site/asx.html            && echo "✅ ASX"             || echo "⚠️  ASX not found"
           [ -f "USAs/rsi_mtf_report_NYSE.html" ] && cp USAs/rsi_mtf_report_NYSE.html _site/usa.html && echo "✅ USA/NYSE"      || echo "⚠️  USA/NYSE not found"
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
-          [ -f "multibagger_report.html"] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
+          [ -f "multibagger_report.html" ] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
 
           # Charts — copy from repo checkout (committed PNGs) merged with
           # any fresh PNGs downloaded from the rsi-charts artifact above.
