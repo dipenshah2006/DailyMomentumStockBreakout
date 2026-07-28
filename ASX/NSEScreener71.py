@@ -18,35 +18,37 @@ OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 import os
 import glob as _glob
 
+# Resolve paths relative to this script's location so the script works
+# regardless of the working directory (e.g. when run from repo root as
+# "python ASX/NSEScreener71.py" or from within the ASX/ folder).
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT  = os.path.dirname(SCRIPT_DIR)   # one level up from ASX/
+
 # ═════════════════════════════════════════════════════════════════════════════
 # USER CONFIG
 # ═════════════════════════════════════════════════════════════════════════════
 
-LOCAL_NSE_CSV       = "india/NSE/NSECash/EQUITY_L.csv"
+LOCAL_NSE_CSV       = os.path.join(REPO_ROOT, "india", "NSE", "NSECash", "EQUITY_L.csv")
 NSE_CSV_URL         = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 SERIES_FILTER       = ["EQ"]       # NSE equity series (EQ = cash equities)
 
-LOCAL_SME_CSV       = "india/NSE/NSESME/MW-SME-05-May-2026.csv"
+LOCAL_SME_CSV       = os.path.join(REPO_ROOT, "india", "NSE", "NSESME", "MW-SME-05-May-2026.csv")
 SME_SERIES_FILTER   = ["ST", "SM"] # NSE SME series (ST = SME T, SM = SME M)
 
 # Nifty Indices Master Excel — multi-sheet workbook with *_Stocks sheets
 # Layout: sheets named Broad_Based_Stocks, Sectoral_Stocks, Thematic_Stocks,
 #         Strategy_Stocks, All_Stocks_Combined
 # Columns: #, Index Name, Category, Symbol, Company Name  (header on row 3)
-LOCAL_INDICES_XLSX  = "india/NSE/NIFTY_Indices_Master.xlsx"
+LOCAL_INDICES_XLSX  = os.path.join(REPO_ROOT, "india", "NSE", "NIFTY_Indices_Master.xlsx")
 
 # Optional: folder containing individual NSE index constituent CSVs
-# e.g. india/NSE/NseIndice/ind_nifty50list.csv, ind_niftybanklist.csv, etc.
-# Download from: https://www.niftyindices.com/indices/equity/broad-based-indices
-# Supports filenames like: ind_nifty50list.csv, ind_niftyAlpha_Index.csv, ind_nifty_alpha_lowvol30list.csv
-# Name extraction strips: leading "ind_" / "Ind_", trailing "list" / "_list", then replaces "_" with spaces
-LOCAL_INDICES_DIR   = "india/NSE/NseIndice"
-LOCAL_FO_CSV        = "india/NSE/nse_fo_list.csv"   # NSE F&O securities list
+LOCAL_INDICES_DIR   = os.path.join(REPO_ROOT, "india", "NSE", "NseIndice")
+LOCAL_FO_CSV        = os.path.join(REPO_ROOT, "india", "NSE", "nse_fo_list.csv")
 
 # ASX (Australian Securities Exchange) stocks
 # CSV columns expected: "ACT Symbol", "Company name", "GICS industry group"
-LOCAL_ASX_CSV       = "ASX/nyse-listed.csv"
-ASX_CHART_OUTPUT_DIR = "charts/asx"            # folder for ASX chart PNGs
+LOCAL_ASX_CSV       = os.path.join(SCRIPT_DIR, "nyse-listed.csv")
+ASX_CHART_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "charts", "asx")   # ASX chart PNGs
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
@@ -55,8 +57,8 @@ MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise 
 _chart_override = os.environ.get("MAX_CHART_STOCKS_OVERRIDE", "")
 if _chart_override.isdigit():
     MAX_CHART_STOCKS = int(_chart_override)
-GITHUB_CHARTS_BASE  = "charts"   # "https://raw.githubusercontent.com/dipenshah2006/DailyMomentumStockBreakout/main/charts"
-CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
+GITHUB_CHARTS_BASE  = "charts"
+CHART_OUTPUT_DIR    = os.path.join(REPO_ROOT, "charts")   # repo-root charts/ folder
 CHART_BARS          = 90        # bars per chart — 90 days is plenty; 120 adds ~25% render time
 CHART_DPI           = 120       # Good quality; 200 is overkill and ~3x slower
 
@@ -160,9 +162,9 @@ RUN_TS      = datetime.now().strftime("%d %b %Y  %H:%M")
 _STAMP      = datetime.now().strftime("%d%m%Y_%H%M")
 START_TS    = RUN_TS
 START_TIME  = time.time()
-OUTPUT_HTML = "asx_report_NSE.html"        # fixed name — avoids conflict with main NSE report
-ERROR_LOG   = f"error_log_{_STAMP}.txt"   # timestamped so each run's errors are separate
-CACHE_FILE  = "asx_stock_cache.pkl"
+OUTPUT_HTML = os.path.join(REPO_ROOT, "asx_report_NSE.html")   # written to repo root
+ERROR_LOG   = os.path.join(REPO_ROOT, f"error_log_{_STAMP}.txt")
+CACHE_FILE  = os.path.join(REPO_ROOT, "asx_stock_cache.pkl")
 CHART_CACHE_META = os.path.join(CHART_OUTPUT_DIR, "chart_cache.json")
 
 # ═════════════════════════════════════════════════════════════════════════════

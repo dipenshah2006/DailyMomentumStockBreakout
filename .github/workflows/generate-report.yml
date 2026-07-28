@@ -353,22 +353,28 @@ jobs:
           if-no-files-found: warn
 
   # ════════════════════════════════════════════════════════════════
-  #  6. ASX Screener — self-hosted runner (no timeout limit)
+  #  6. ASX Screener
   #     Scans NSE + ASX stocks; can take several hours.
   # ════════════════════════════════════════════════════════════════
   asx-report:
     name: ASX Screener
-    runs-on: self-hosted
-    # No timeout-minutes — self-hosted runners have no GitHub-imposed limit
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install \
+          python -m pip install --upgrade pip
+          python -m pip install \
             "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
             "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
 
@@ -403,22 +409,28 @@ jobs:
           if-no-files-found: warn
 
   # ════════════════════════════════════════════════════════════════
-  #  7. USA / NYSE Screener — self-hosted runner (no timeout limit)
+  #  7. USA / NYSE Screener
   #     Scans NYSE stocks; can take several hours.
   # ════════════════════════════════════════════════════════════════
   usa-report:
     name: USA / NYSE Screener
-    runs-on: self-hosted
-    # No timeout-minutes — self-hosted runners have no GitHub-imposed limit
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install \
+          python -m pip install --upgrade pip
+          python -m pip install \
             "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
             "matplotlib>=3.7.0" "requests>=2.31.0" "openpyxl>=3.1.0"
 
