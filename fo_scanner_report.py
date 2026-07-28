@@ -923,9 +923,9 @@ def build_html(results: list[dict], gen_time: str) -> str:
     for rank, r in enumerate(results, 1):
         chart_path   = os.path.join(CHARTS_DIR, f"{r['sym']}.png")
         chart15_path = os.path.join(CHARTS_DIR, f"{r['sym']}_15m.png")
-        chart_btn    = (f'<a href="/charts/fo/{r["sym"]}.png" target="_blank" class="cbtn">📊 Daily</a>'
+        chart_btn    = (f'<a href="charts/fo/{r["sym"]}.png" target="_blank" class="cbtn">📊 Daily</a>'
                         if os.path.exists(chart_path) else "")
-        chart15_btn  = (f'<a href="/charts/fo/{r["sym"]}_15m.png" target="_blank" class="cbtn green">📐 15m Fib</a>'
+        chart15_btn  = (f'<a href="charts/fo/{r["sym"]}_15m.png" target="_blank" class="cbtn green">📐 15m Fib</a>'
                         if os.path.exists(chart15_path) else "")
 
         sigs = "<br>".join(r["signals"]) if r["signals"] else "—"
