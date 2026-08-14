@@ -232,7 +232,7 @@ jobs:
         run: |
           git config user.name  "NSE Bot"
           git config user.email "bot@noreply"
-          git pull --rebase origin main
+          git pull --rebase --autostash origin main
           git add rocket_scan_latest.html
           git diff --cached --quiet \
             && echo "No changes in rocket_scan_latest.html — skipping commit" \
