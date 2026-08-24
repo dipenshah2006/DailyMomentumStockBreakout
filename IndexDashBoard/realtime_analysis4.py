@@ -1938,9 +1938,14 @@ def run_analysis_cycle(config, live=False):
         }
         for future in as_completed(futures):
             t = futures[future]
-            df = future.result()
-            if not df.empty:
-                daily_data[t] = df
+            try:
+                df = future.result()
+                if df is not None and not df.empty:
+                    daily_data[t] = df
+            except Exception as e:
+                # A single malformed/delisted Yahoo response must not abort
+                # the complete NSE dashboard run.
+                logger.warning(f"Daily data failed for {t}: {e}")
     logger.info(f"Downloaded daily data for {len(daily_data)} tickers.")
 
     # 4. Intraday (live mode only)
@@ -1961,10 +1966,13 @@ def run_analysis_cycle(config, live=False):
     ticker_indicators = {}
     for t in all_tickers:
         if t in daily_data:
-            ticker_indicators[t] = compute_ticker_indicators(
-                t, daily_data[t],
-                intraday_15m.get(t, pd.DataFrame()),
-                intraday_1h.get(t,  pd.DataFrame()))
+            try:
+                ticker_indicators[t] = compute_ticker_indicators(
+                    t, daily_data[t],
+                    intraday_15m.get(t, pd.DataFrame()),
+                    intraday_1h.get(t,  pd.DataFrame()))
+            except Exception as e:
+                logger.warning(f"Indicators failed for {t}: {e}")
 
     # 6. Synthetic indices
     synthetic_indicators = {}
@@ -2150,9 +2158,12 @@ def run_analysis_cycle(config, live=False):
     stock_screener_rows = []
     for sym in all_stocks:
         tick = f"{sym}.NS"
-        row  = compute_stock_screener_row(sym, tick, daily_data)
-        if row is not None:
-            stock_screener_rows.append(row)
+        try:
+            row = compute_stock_screener_row(sym, tick, daily_data)
+            if row is not None:
+                stock_screener_rows.append(row)
+        except Exception as e:
+            logger.warning(f"Screener row failed for {sym}: {e}")
     stock_screener_rows.sort(key=lambda r: r.get("Score", 0), reverse=True)
     logger.info(f"Stock screener: {len(stock_screener_rows)} stocks scored.")
 
@@ -2162,9 +2173,12 @@ def run_analysis_cycle(config, live=False):
     for row in stock_screener_rows[:200]:
         sym   = row["Symbol"]
         tick  = f"{sym}.NS"
-        paths = build_stock_chart(sym, tick, daily_data, charts_dir)
-        if paths:
-            stock_chart_paths[sym] = paths
+        try:
+            paths = build_stock_chart(sym, tick, daily_data, charts_dir)
+            if paths:
+                stock_chart_paths[sym] = paths
+        except Exception as e:
+            logger.warning(f"Stock chart failed for {sym}: {e}")
     logger.info(f"Saved charts for {len(stock_chart_paths)} stocks → {charts_dir}")
 
     # 10. Write HTML dashboard
