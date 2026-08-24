@@ -43,11 +43,9 @@ LOCAL_FO_CSV        = "india/NSE/nse_fo_list.csv"   # NSE F&O securities list
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
-MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise top N stocks
-# Allow GitHub Actions (or any CI) to cap chart count via env variable
-_chart_override = os.environ.get("MAX_CHART_STOCKS_OVERRIDE", "")
-if _chart_override.isdigit():
-    MAX_CHART_STOCKS = int(_chart_override)
+# Always generate a chart for every symbol that completes analysis.
+# Do not allow CI/environment overrides to silently reduce chart coverage.
+MAX_CHART_STOCKS    = 0
 CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
 GITHUB_CHARTS_BASE  = "charts"   # "https://raw.githubusercontent.com/dipenshah2006/DailyMomentumStockBreakout/main/charts"
 
@@ -3767,29 +3765,14 @@ def main(force_charts: bool = False):
     os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
     print(f"   Generating charts for {'all' if MAX_CHART_STOCKS <= 0 else 'top'} {len(chart_tickers)} stocks...")
 
-    meta = _load_chart_cache_meta()
     stale = []
-    cached = 0
     for d in chart_candidates:
         ticker = d["ticker"]
         chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png").replace("\\", "/")
         chart_hash = _compute_chart_hash(d)
-        # Existing chart images are valid report assets even when the metadata
-        # hash is stale (for example after a cache refresh or code update).
-        # Reusing them keeps a full NSE scan from spending another long run
-        # regenerating thousands of PNGs before the HTML can be published.
-        if not force_charts and os.path.exists(chart_path):
-            chart_data[ticker] = chart_path
-            cached += 1
-            if chart_hash and meta.get(ticker, {}).get("hash") != chart_hash:
-                meta[ticker] = {
-                    "hash": chart_hash,
-                    "updated_at": datetime.now().strftime("%d %b %Y %H:%M"),
-                }
-            continue
         stale.append((d, chart_hash, chart_path))
 
-    print(f"   Reusing {cached}/{len(chart_tickers)} cached charts")
+    print(f"   Chart cache disabled — regenerating {len(stale)}/{len(chart_tickers)} charts")
 
     if stale:
         workers = min(CHART_WORKERS, len(stale))
@@ -3807,17 +3790,13 @@ def main(force_charts: bool = False):
                     log_error(ticker, get_company_name(ticker), "CHART-PARALLEL", exc)
                 if generated_path:
                     chart_data[ticker] = generated_path
-                    meta[ticker] = {"hash": chart_hash, "updated_at": datetime.now().strftime("%d %b %Y %H:%M")}
-                elif os.path.exists(chart_path):
-                    chart_data[ticker] = chart_path
                 else:
                     print(f"\n   ⚠️ Chart failed for {ticker} — see {ERROR_LOG}")
                 sys.stdout.write(f"\r   Charts completed: {completed}/{len(stale)}")
                 sys.stdout.flush()
         print()
-        _save_chart_cache_meta(meta)
     else:
-        print("   No charts to generate.")
+        print("   No charts selected.")
 
     print(f"   {len(chart_data)}/{len(chart_tickers)} charts generated")
 
