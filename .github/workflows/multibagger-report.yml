@@ -32,8 +32,8 @@ jobs:
 
   multibagger:
     name: Multibagger Report
-    runs-on: self-hosted      # your own machine — no timeout limit at all
-    # timeout-minutes is intentionally omitted so the job runs as long as needed
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
