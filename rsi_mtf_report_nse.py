@@ -3471,11 +3471,14 @@ _HTML_FIELDS = {
 }
 
 
-def _html_safe_stock(d: dict) -> dict:
+def _html_safe_stock(d: dict, chart_version: str = "") -> dict:
     rec = {k: d[k] for k in _HTML_FIELDS if k in d}
     # Keep chart file reference (don't embed base64 — charts loaded on demand from file)
     if d.get('has_chart'):
         chart_path = f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
+        # The filename is stable, so GitHub Pages/CDN can otherwise serve an old PNG.
+        if chart_version:
+            chart_path += f"?v={chart_version}"
         rec['chart_path'] = chart_path
     return rec
 
@@ -3518,7 +3521,9 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
         d["has_chart"] = d["ticker"] in chart_tickers
 
     # ── Serialize to compact JSON (only the fields needed by HTML/JS) ───────
-    safe_results = [_html_safe_stock(d) for d in all_results]
+    # Version static chart URLs on every report run to avoid stale Pages/CDN images.
+    chart_version = re.sub(r"[^A-Za-z0-9_.-]", "", run_ts)
+    safe_results = [_html_safe_stock(d, chart_version) for d in all_results]
     stocks_json = json.dumps(safe_results, ensure_ascii=False, default=str, separators=(",", ":"))
 
     stat_boxes = f"""<div class="stats-row">
