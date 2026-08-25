@@ -769,6 +769,19 @@ def calc_rsi(close, period=14):
     loss  = (-delta).clip(lower=0).ewm(com=period - 1, min_periods=period).mean()
     return 100 - (100 / (1 + gain / (loss + 1e-10)))
 
+def rsi_sma_status(rsi, sma):
+    """Classify RSI(14) versus SMA(14) for a timeframe status tag."""
+    try:
+        rsi, sma = float(rsi), float(sma)
+    except (TypeError, ValueError):
+        return "RANGEBOUND"
+    spread = rsi - sma
+    if spread >= 5 and rsi >= 60:
+        return "STRONG UPTREND"
+    if abs(spread) <= 2 or 45 <= rsi <= 55:
+        return "RANGEBOUND"
+    return "BULLISH" if spread > 0 else "BEARISH"
+
 def calc_macd(close, fast=12, slow=26, sig=9):
     line   = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
     signal = line.ewm(span=sig, adjust=False).mean()
@@ -2131,6 +2144,13 @@ a{color:var(--cyan)}
                 font-size:10px;font-weight:700;border:1px solid;margin:1px 2px}
 .rsi-cross-bull{background:#0d3320;color:var(--green);border-color:#26d07c55}
 .rsi-cross-bear{background:#2d0a0a;color:var(--red);border-color:#ff4d6d55}
+.rsi-status-tag{display:inline-block;border-radius:8px;padding:1px 6px;
+                 font-size:9px;font-weight:700;border:1px solid;margin:1px 2px;
+                 white-space:nowrap}
+.rsi-status-strong{background:#063d28;color:#00e676;border-color:#00e67666}
+.rsi-status-bull{background:#0d3320;color:var(--green);border-color:#26d07c55}
+.rsi-status-bear{background:#2d0a0a;color:var(--red);border-color:#ff4d6d55}
+.rsi-status-range{background:#2d2600;color:var(--gold);border-color:#ffd70055}
 .n50-tag{background:#1a0d30;color:var(--purple);border-radius:8px;padding:1px 7px;
          font-size:10px;font-weight:700;border:1px solid #b39ddb44}
 .sme-tag{background:#1a2d0d;color:#4caf50;border-radius:8px;padding:1px 7px;
@@ -2367,6 +2387,27 @@ function rsiCrossoverTags(s){
   }).join(' ');
 }
 
+function rsiStatusTag(tf,rsi,sma){
+  const spread=Number(rsi)-Number(sma);
+  let status, cls, icon;
+  if(spread>=5 && Number(rsi)>=60){
+    status='STRONG UPTREND'; cls='rsi-status-strong'; icon='🚀';
+  }else if(Math.abs(spread)<=2 || (Number(rsi)>=45 && Number(rsi)<=55)){
+    status='RANGEBOUND'; cls='rsi-status-range'; icon='↔';
+  }else if(spread>0){
+    status='BULLISH'; cls='rsi-status-bull'; icon='▲';
+  }else{
+    status='BEARISH'; cls='rsi-status-bear'; icon='▼';
+  }
+  return `<span class="rsi-status-tag ${cls}" title="${tf} RSI(14) ${rsi} vs SMA(14) ${sma}">${icon} ${tf[0]} ${status}</span>`;
+}
+
+function rsiTimeframeTags(s){
+  return rsiStatusTag('Daily',s.rsi_d,s.sma_d)+
+    rsiStatusTag('Weekly',s.rsi_w,s.sma_w)+
+    rsiStatusTag('Monthly',s.rsi_m,s.sma_m);
+}
+
 const CROSS_LABELS={
   'any-bullish':'Any bullish crossover',
   'any-bearish':'Any bearish crossover',
@@ -2496,8 +2537,10 @@ function rowHTML(s){
     :'<div style="font-size:10px;color:var(--sub)">—</div>';
   const _athTag = athTag(s);
   const _rsiCrossTags = rsiCrossoverTags(s);
+  const _rsiStatusTags = rsiTimeframeTags(s);
   return `<tr class="sum-row">
   <td><b style="color:var(--cyan)">${esc(s.ticker)}</b> ${frTag}${n50Tag}${smeTag}
+      <div style="margin-top:2px">${_rsiStatusTags}</div>
       <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div>
       <div style="font-size:10px;color:var(--gold);font-weight:600">${fmtINR(s.close)}</div>
       ${foTag?`<span style="margin-left:2px">${foTag}</span>`:''}
@@ -2602,10 +2645,12 @@ function cardSummaryHTML(s,idx){
   const secTag=_cSecList.map(l=>`<span class="sector-tag">${esc(l)}</span>`).join(' ');
   const _ath=athTag(s);
   const _rsiCrossTags=rsiCrossoverTags(s);
+  const _rsiStatusTags=rsiTimeframeTags(s);
   return `<details class="stock-card" data-idx="${idx}">
   <summary>
     <span class="card-arrow">▶</span>
     <span class="card-ticker">${esc(s.ticker)}</span>
+    ${_rsiStatusTags}
     <span class="card-price">${fmtINR(s.close)}</span>
     ${phaseBadge(s.phase)}
     <span class="${s.sig_cls}" style="font-weight:700">${esc(s.signal)}</span>
@@ -2939,13 +2984,21 @@ def _build_detail_panels(d: dict) -> str:
 
     # RSI table
     def rsi_row(tf, rv, sv, is_fresh_tf):
-        cls = "g" if rv > sv else "r"
-        arr = "▲" if rv > sv else "▼"
+        status = rsi_sma_status(rv, sv)
+        status_cls = {
+            "STRONG UPTREND": "rsi-status-strong",
+            "BULLISH": "rsi-status-bull",
+            "BEARISH": "rsi-status-bear",
+            "RANGEBOUND": "rsi-status-range",
+        }[status]
+        icon = {"STRONG UPTREND": "🚀", "BULLISH": "▲",
+                "BEARISH": "▼", "RANGEBOUND": "↔"}[status]
+        cls = "g" if status in ("STRONG UPTREND", "BULLISH") else "r" if status == "BEARISH" else ""
         fr  = ' <span class="fresh-tag">FRESH</span>' if is_fresh_tf else ""
         return (f'<tr><td>{tf}</td>'
                 f'<td class="{cls}"><b>{rv}</b></td>'
                 f'<td style="font-size:10px;color:var(--sub)">{sv}</td>'
-                f'<td class="{cls}">{arr}{"ABOVE" if rv>sv else "BELOW"}{fr}</td></tr>')
+                f'<td><span class="rsi-status-tag {status_cls}">{icon} {status}</span>{fr}</td></tr>')
 
     def cci_row(tf, v):
         cls = "g" if v > 0 else "r"
