@@ -518,6 +518,13 @@ jobs:
           path: .
         continue-on-error: true
 
+      - name: Clear previous chart staging
+        run: |
+          # Never fall back to committed/old PNGs when assembling Pages.
+          # Each report publishes content-hashed chart filenames.
+          rm -rf charts
+          mkdir -p charts
+
       - name: Download RSI Charts
         uses: actions/download-artifact@v4
         with:

@@ -1970,7 +1970,9 @@ def generate_chart(data: dict) -> str:
         updated_at = datetime.now().strftime("%d %b %Y %H:%M")
         fig.text(0.995, 0.005, f"Updated: {updated_at}", ha="right", va="bottom", color=TXT, fontsize=9, style="italic")
         os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
-        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
+        # Use the per-run content-hashed path when available.  A stable filename
+        # allows GitHub Pages/CDNs to serve an older PNG indefinitely.
+        chart_path = data.get("_chart_path") or os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
         fig.savefig(chart_path, format="png", dpi=CHART_DPI, bbox_inches="tight", facecolor=BG)
         plt.close(fig)
         return chart_path.replace("\\", "/")
@@ -3463,7 +3465,7 @@ _HTML_FIELDS = {
     'sell_conds','score','phase','signal','sig_cls','fresh_d','fresh_d_bars','fresh_w',
     'fresh_w_bars','donchian_d','donchian_w','donchian_m','is_nifty50','is_sme','is_fo','sector','sectors','indices','marketcap','cap_cat','cap_cls',
     'rank_nifty50','rank_nifty50_pos','rank_nifty50_of','rank_universe','rank_univ_pos',
-    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','rsi_crossovers','has_chart',
+    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','rsi_crossovers','has_chart','chart_url',
     'ath_price','ath_date','ath_pct','is_ath','ath_time_str',
     'explosive_score','explosive_signals','vol_ratio',
     'bb_upper','bb_mid','bb_lower','bb_pct','bb_slope',
@@ -3471,15 +3473,11 @@ _HTML_FIELDS = {
 }
 
 
-def _html_safe_stock(d: dict, chart_version: str = "") -> dict:
+def _html_safe_stock(d: dict) -> dict:
     rec = {k: d[k] for k in _HTML_FIELDS if k in d}
     # Keep chart file reference (don't embed base64 — charts loaded on demand from file)
     if d.get('has_chart'):
-        chart_path = f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
-        # The filename is stable, so GitHub Pages/CDN can otherwise serve an old PNG.
-        if chart_version:
-            chart_path += f"?v={chart_version}"
-        rec['chart_path'] = chart_path
+        rec['chart_path'] = d.get('chart_url') or f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
     return rec
 
 
@@ -3519,11 +3517,12 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
         d["cap_cat"]   = cap_cat
         d["cap_cls"]   = cap_cls
         d["has_chart"] = d["ticker"] in chart_tickers
+        if d["has_chart"]:
+            chart_file = os.path.basename(chart_data[d["ticker"]])
+            d["chart_url"] = f"{GITHUB_CHARTS_BASE}/{chart_file}"
 
     # ── Serialize to compact JSON (only the fields needed by HTML/JS) ───────
-    # Version static chart URLs on every report run to avoid stale Pages/CDN images.
-    chart_version = re.sub(r"[^A-Za-z0-9_.-]", "", run_ts)
-    safe_results = [_html_safe_stock(d, chart_version) for d in all_results]
+    safe_results = [_html_safe_stock(d) for d in all_results]
     stocks_json = json.dumps(safe_results, ensure_ascii=False, default=str, separators=(",", ":"))
 
     stat_boxes = f"""<div class="stats-row">
@@ -3773,8 +3772,12 @@ def main(force_charts: bool = False):
     stale = []
     for d in chart_candidates:
         ticker = d["ticker"]
-        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png").replace("\\", "/")
         chart_hash = _compute_chart_hash(d)
+        # The content hash makes every changed chart a new URL, permanently
+        # avoiding browser/CDN cache collisions between report runs.
+        chart_name = f"{ticker}_{chart_hash[:16] or 'latest'}.png"
+        chart_path = os.path.join(CHART_OUTPUT_DIR, chart_name).replace("\\", "/")
+        d["_chart_path"] = chart_path
         stale.append((d, chart_hash, chart_path))
 
     print(f"   Chart cache disabled — regenerating {len(stale)}/{len(chart_tickers)} charts")
@@ -3795,6 +3798,7 @@ def main(force_charts: bool = False):
                     log_error(ticker, get_company_name(ticker), "CHART-PARALLEL", exc)
                 if generated_path:
                     chart_data[ticker] = generated_path
+                    d["_chart_path"] = generated_path
                 else:
                     print(f"\n   ⚠️ Chart failed for {ticker} — see {ERROR_LOG}")
                 sys.stdout.write(f"\r   Charts completed: {completed}/{len(stale)}")
