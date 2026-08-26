@@ -396,18 +396,17 @@ jobs:
           pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Create directories
-        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/asx
+        run: mkdir -p ASX/charts/asx
 
-      - name: Download NSE equity list
-        run: |
-          curl -sL \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-            -H "Referer: https://www.nseindia.com/" \
-            --retry 3 --retry-delay 5 --max-time 30 \
-            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
-            -o india/NSE/NSECash/EQUITY_L.csv \
-          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
-          || echo "⚠️  NSE CSV blocked — using built-in ticker list"
+      # Keep the ASX cache between runs. Without this, every run downloads the
+      # whole universe from Yahoo again and is much more likely to be rate limited.
+      - name: Restore ASX data cache
+        uses: actions/cache@v4
+        with:
+          path: asx_stock_cache.pkl
+          key: asx-stock-cache-${{ runner.os }}-${{ hashFiles('ASX/NSEScreener71.py', 'ASX/nyse-listed.csv') }}
+          restore-keys: |
+            asx-stock-cache-${{ runner.os }}-
 
       - name: Run ASX Screener
         id: run
@@ -416,14 +415,35 @@ jobs:
           PYTHONUNBUFFERED: '1'
         run: python ASX/NSEScreener71.py
 
+      # Never publish a green-but-empty report when Yahoo has rate-limited the job.
+      - name: Validate ASX report contains data
+        id: validate
+        if: steps.run.outcome == 'success'
+        run: |
+          test -s asx_report_NSE.html
+          if ! grep -Eq 'Showing <b id="rc">[1-9][0-9]*</b> of' asx_report_NSE.html; then
+            echo "❌ ASX report contains zero analysed stocks; refusing to publish it"
+            exit 1
+          fi
+          echo "✅ ASX report contains analysed stock data"
+
       - name: Upload ASX HTML
-        if: always()
+        if: steps.validate.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: asx-html
           path: asx_report_NSE.html
           retention-days: 3
-          if-no-files-found: warn
+          if-no-files-found: error
+
+      - name: Upload ASX error log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asx-error-${{ github.run_number }}
+          path: error_log_*.txt
+          retention-days: 7
+          if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
   #  7. USA / NYSE Screener
