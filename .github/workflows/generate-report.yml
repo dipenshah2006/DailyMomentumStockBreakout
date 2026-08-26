@@ -33,7 +33,8 @@ permissions:
 
 concurrency:
   group: github-pages
-  cancel-in-progress: false
+  # A stale long-running scan must not block a corrected manual run.
+  cancel-in-progress: true
 
 # ── Each report runs in its own parallel job — a failure or timeout
 # ── in one does NOT affect the others. The deploy job always runs
