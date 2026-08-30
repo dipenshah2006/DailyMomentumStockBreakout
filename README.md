@@ -17,6 +17,7 @@ Updated automatically by GitHub Actions. No login required — bookmark and shar
 | 🚀 Rocket Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/rocket.html |
 | ⚡ Intraday Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/intraday.html |
 | 📊 NSE Index Dashboard | https://dipenshah2006.github.io/DailyMomentumStockBreakout/index-dashboard.html |
+| 📅 Monthly MACD + CCI Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/monthlytrend.html |
 | 🦘 ASX Screener | https://dipenshah2006.github.io/DailyMomentumStockBreakout/asx.html |
 | 🇺🇸 USA / NYSE Screener | https://dipenshah2006.github.io/DailyMomentumStockBreakout/usa.html |
 | 📆 Weekly Market Digest | https://dipenshah2006.github.io/DailyMomentumStockBreakout/weekly-digest.html |
@@ -36,6 +37,7 @@ Reports run through GitHub Actions and are published to the GitHub Pages URLs ab
 | 9:00 PM | 🚀 Rocket Scanner | 9:15 PM |
 | 9:00 PM | 📊 F&O Scanner (~212 stocks) | 9:30–9:40 PM |
 | 9:00 PM | 📊 NSE Index Dashboard | 9:15 PM |
+| 9:00 PM | 📅 Monthly MACD + CCI Breakout | Varies — full NSE universe |
 | 9:00 PM | 🦘 ASX Screener | Varies — self-hosted runner |
 | 9:00 PM | 🇺🇸 USA / NYSE Screener | Varies — self-hosted runner |
 | Saturday 5:00 AM | 📆 Weekly Market Digest | 5:15–5:30 AM |
@@ -75,6 +77,10 @@ DailyMomentumStockBreakout/
 ├── charts/                        # Generated PNG charts (served via /charts/ route)
 │   ├── multibagger/               # Multibagger daily charts
 │   └── fo/                        # F&O scanner charts (daily 5-panel + 15-min Fibonacci)
+│
+├── MonthlyTrend/                  # Daily monthly MACD + CCI breakout screener
+│   ├── monthly_macd_cci_breakout_screener.py  # Main script
+│   └── monthly_breakout_report.html           # Generated report
 │
 └── .github/
     └── workflows/
@@ -179,7 +185,16 @@ Runs at **9:30 AM IST** (Mon–Fri). Scans top 500 NSE stocks using live 5-minut
 
 ---
 
-### 7. `send_report_email.py` — Bulk Emailer
+### 7. `MonthlyTrend/monthly_macd_cci_breakout_screener.py` — Monthly MACD + CCI Breakout
+
+Scans the NSE universe using monthly MACD and CCI crossover signals, trend stages,
+Fibonacci targets, reward-to-risk levels, and chart-based pattern detection.
+
+**Output:** `MonthlyTrend/monthly_breakout_report.html` → GitHub Pages `monthlytrend.html`
+
+---
+
+### 8. `send_report_email.py` — Bulk Emailer
 
 Sends reports to any number of subscribers using Gmail SMTP.
 
