@@ -16,6 +16,10 @@ MonthlyTrend/.yf_tz_cache/
 MonthlyTrend/monthly_breakout_report.html
 MonthlyTrend/monthly_charts/*.html
 MonthlyTrend/monthlytrend-attempt-*.log
+TradingViewTypeCharts/cache_parquet/
+TradingViewTypeCharts/.yf_tz_cache/
+TradingViewTypeCharts/charts/*.html
+TradingViewTypeCharts/tradingview-attempt-*.log
 
 # Python
 __pycache__/

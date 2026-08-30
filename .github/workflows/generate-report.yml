@@ -599,14 +599,114 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  #  9. Deploy & Send Emails
-  #     Runs after ALL 8 report jobs — whether they pass or fail.
+  #  9. TradingView-style RSI / CCI / MACD Screener
+  #     Generates the interactive Lightweight Charts report daily.
+  # ═══════════════════════════════════════════════════════════════
+  tradingview-report:
+    name: TradingView Charts Screener
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install TradingView Charts dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
+            "scipy>=1.10.0" "pyarrow>=12.0.0"
+
+      - name: Restore TradingView Charts data cache
+        uses: actions/cache@v4
+        with:
+          path: TradingViewTypeCharts/cache_parquet
+          key: tradingview-cache-${{ runner.os }}-${{ hashFiles('TradingViewTypeCharts/*.py', 'TradingViewTypeCharts/EQUITY_L.csv') }}
+          restore-keys: |
+            tradingview-cache-${{ runner.os }}-
+
+      - name: Run TradingView Charts Screener
+        id: run
+        env:
+          PYTHONUNBUFFERED: '1'
+        shell: bash
+        run: |
+          set +e
+          status=1
+          for attempt in 1 2 3; do
+            echo "▶ TradingView Charts attempt ${attempt}/3"
+            python TradingViewTypeCharts/rsi_cci_macd_screener.py \
+              --universe TradingViewTypeCharts/EQUITY_L.csv \
+              --workers 8 \
+              2>&1 | tee "TradingViewTypeCharts/tradingview-attempt-${attempt}.log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "⚠️ TradingView Charts failed (exit ${status}); retrying in 30 seconds..."
+              sleep 30
+            fi
+          done
+          exit "$status"
+
+      - name: Validate TradingView Charts report
+        id: validate
+        if: steps.run.outcome == 'success'
+        shell: bash
+        run: |
+          test -s TradingViewTypeCharts/rsi_cci_macd_report.html
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          html = Path("TradingViewTypeCharts/rsi_cci_macd_report.html").read_text(encoding="utf-8")
+          match = re.search(r'const DATA = (.*?);\nconst TOOLTIPS', html, re.S)
+          if not match:
+              raise SystemExit("TradingView Charts report has no embedded DATA payload")
+          rows = json.loads(match.group(1))
+          if not rows:
+              raise SystemExit("TradingView Charts report contains zero usable stocks")
+          print(f"✅ TradingView Charts report contains {len(rows)} usable stocks")
+          PY
+
+      - name: Upload TradingView Charts report
+        if: steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradingview-report
+          path: |
+            TradingViewTypeCharts/rsi_cci_macd_report.html
+            TradingViewTypeCharts/charts/
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload TradingView Charts run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradingview-logs-${{ github.run_number }}
+          path: TradingViewTypeCharts/tradingview-attempt-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════
+  #  10. Deploy & Send Emails
+  #     Runs after ALL 9 report jobs — whether they pass or fail.
   #     Publishes whatever HTML was generated to GitHub Pages,
   #     then sends the appropriate emails.
   # ═══════════════════════════════════════════════════════════════
   deploy:
     name: Deploy & Email
-    needs: [rsi-report, ath-report, rocket-report, fo-report, index-dashboard, asx-report, usa-report, monthlytrend-report]
+    needs: [rsi-report, ath-report, rocket-report, fo-report, index-dashboard, asx-report, usa-report, monthlytrend-report, tradingview-report]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -716,6 +816,13 @@ jobs:
           path: MonthlyTrend
         continue-on-error: true
 
+      - name: Download TradingView Charts report
+        uses: actions/download-artifact@v4
+        with:
+          name: tradingview-report
+          path: TradingViewTypeCharts
+        continue-on-error: true
+
       - name: Prepare GitHub Pages output
         run: |
           mkdir -p _site
@@ -747,6 +854,12 @@ jobs:
             cp -r MonthlyTrend/monthly_charts/. _site/monthly_charts/
             echo "✅ MonthlyTrend charts → _site/monthly_charts/"
           fi
+          [ -f "TradingViewTypeCharts/rsi_cci_macd_report.html" ] && cp TradingViewTypeCharts/rsi_cci_macd_report.html _site/tradingview.html && echo "✅ TradingView Charts" || echo "⚠️  TradingView Charts not found"
+          if [ -d "TradingViewTypeCharts/charts" ]; then
+            mkdir -p _site/charts
+            cp -r TradingViewTypeCharts/charts/. _site/charts/
+            echo "✅ TradingView Charts → _site/charts/"
+          fi
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
           [ -f "multibagger_report.html" ] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
@@ -754,7 +867,8 @@ jobs:
           # Charts — copy from repo checkout (committed PNGs) merged with
           # any fresh PNGs downloaded from the rsi-charts artifact above.
           if [ -d "charts" ]; then
-            cp -r charts _site/charts
+            mkdir -p _site/charts
+            cp -r charts/. _site/charts/
             echo "✅ Charts → _site/charts/ ($(ls charts/*.png 2>/dev/null | wc -l) PNGs)"
           else
             echo "⚠️  No charts/ folder found"
