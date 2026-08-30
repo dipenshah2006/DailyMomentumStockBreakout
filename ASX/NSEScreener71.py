@@ -239,10 +239,11 @@ def is_asx_stock(ticker: str) -> bool:
     return ticker in _ASX_STOCKS
 
 
-    """Return list of sector labels for this ticker (e.g. ['NIFTY AUTO - Sectoral',
-    'NIFTY MOBILITY - Thematic']). Empty list if none."""
+def get_sector(ticker: str) -> list[str]:
+    """Return sector labels for this ticker."""
     v = _SECTOR_MAP.get(ticker, [])
     return v if isinstance(v, list) else [v] if v else []
+
 
 def get_indices(ticker: str) -> list[str]:
     """Get list of indices this stock belongs to."""
