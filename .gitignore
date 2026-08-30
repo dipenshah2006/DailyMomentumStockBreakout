@@ -10,6 +10,13 @@ rsi_mtf_report_*.html.tmp
 email_summary.html
 email_subject.txt
 
+# MonthlyTrend generated data and reports
+MonthlyTrend/cache_parquet/
+MonthlyTrend/.yf_tz_cache/
+MonthlyTrend/monthly_breakout_report.html
+MonthlyTrend/monthly_charts/*.html
+MonthlyTrend/monthlytrend-attempt-*.log
+
 # Python
 __pycache__/
 *.pyc

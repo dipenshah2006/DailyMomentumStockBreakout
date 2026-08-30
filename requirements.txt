@@ -12,3 +12,5 @@ gunicorn
 ta-lib-easy
 plotly>=5.18.0
 kaleido>=0.2.1
+pyarrow
+scipy

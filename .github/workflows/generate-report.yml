@@ -499,14 +499,114 @@ jobs:
           if-no-files-found: warn
 
   # ═══════════════════════════════════════════════════════════════
-  #  8. Deploy & Send Emails
-  #     Runs after ALL 7 report jobs — whether they pass or fail.
+  #  8. Monthly MACD + CCI Breakout Screener
+  #     Runs independently so a failure in another scanner does not
+  #     prevent the monthly report from being generated.
+  # ═══════════════════════════════════════════════════════════════
+  monthlytrend-report:
+    name: MonthlyTrend Screener
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install MonthlyTrend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "yfinance>=0.2.54" "pandas>=2.0.0" "numpy>=1.24.0" \
+            "scipy>=1.10.0" "pyarrow>=12.0.0"
+
+      - name: Restore MonthlyTrend data cache
+        uses: actions/cache@v4
+        with:
+          path: MonthlyTrend/cache_parquet
+          key: monthlytrend-cache-${{ runner.os }}-${{ hashFiles('MonthlyTrend/*.py', 'MonthlyTrend/EQUITY_L.csv') }}
+          restore-keys: |
+            monthlytrend-cache-${{ runner.os }}-
+
+      - name: Run MonthlyTrend Screener
+        id: run
+        env:
+          PYTHONUNBUFFERED: '1'
+        shell: bash
+        run: |
+          set +e
+          status=1
+          for attempt in 1 2 3; do
+            echo "▶ MonthlyTrend attempt ${attempt}/3"
+            python MonthlyTrend/monthly_macd_cci_breakout_screener.py \
+              --universe MonthlyTrend/EQUITY_L.csv \
+              --workers 8 \
+              2>&1 | tee "MonthlyTrend/monthlytrend-attempt-${attempt}.log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "⚠️ MonthlyTrend failed (exit ${status}); retrying in 30 seconds..."
+              sleep 30
+            fi
+          done
+          exit "$status"
+
+      - name: Validate MonthlyTrend report
+        id: validate
+        if: steps.run.outcome == 'success'
+        shell: bash
+        run: |
+          test -s MonthlyTrend/monthly_breakout_report.html
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          html = Path("MonthlyTrend/monthly_breakout_report.html").read_text(encoding="utf-8")
+          match = re.search(r'<div class="sc"><div class="v">(\d+)</div><div class="l">Total</div>', html)
+          if not match:
+              raise SystemExit("MonthlyTrend report has no Total counter")
+          total = int(match.group(1))
+          if total == 0:
+              raise SystemExit("MonthlyTrend report contains zero usable stocks")
+          print(f"✅ MonthlyTrend report contains {total} usable stocks")
+          PY
+
+      - name: Upload MonthlyTrend report and charts
+        if: steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthlytrend-report
+          path: |
+            MonthlyTrend/monthly_breakout_report.html
+            MonthlyTrend/monthly_charts/
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload MonthlyTrend run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthlytrend-logs-${{ github.run_number }}
+          path: MonthlyTrend/monthlytrend-attempt-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════
+  #  9. Deploy & Send Emails
+  #     Runs after ALL 8 report jobs — whether they pass or fail.
   #     Publishes whatever HTML was generated to GitHub Pages,
   #     then sends the appropriate emails.
   # ═══════════════════════════════════════════════════════════════
   deploy:
     name: Deploy & Email
-    needs: [rsi-report, ath-report, rocket-report, fo-report, index-dashboard, asx-report, usa-report]
+    needs: [rsi-report, ath-report, rocket-report, fo-report, index-dashboard, asx-report, usa-report, monthlytrend-report]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -609,6 +709,13 @@ jobs:
           path: charts
         continue-on-error: true
 
+      - name: Download MonthlyTrend report and charts
+        uses: actions/download-artifact@v4
+        with:
+          name: monthlytrend-report
+          path: MonthlyTrend
+        continue-on-error: true
+
       - name: Prepare GitHub Pages output
         run: |
           mkdir -p _site
@@ -634,6 +741,12 @@ jobs:
           [ -f "index_analysis.html"    ] && cp index_analysis.html     _site/index-dashboard.html && echo "✅ Index Dashboard" || echo "⚠️  Index Dashboard not found"
           [ -f "asx_report_NSE.html"    ] && cp asx_report_NSE.html     _site/asx.html            && echo "✅ ASX"             || echo "⚠️  ASX not found"
           [ -f "USAs/rsi_mtf_report_NYSE.html" ] && cp USAs/rsi_mtf_report_NYSE.html _site/usa.html && echo "✅ USA/NYSE"      || echo "⚠️  USA/NYSE not found"
+          [ -f "MonthlyTrend/monthly_breakout_report.html" ] && cp MonthlyTrend/monthly_breakout_report.html _site/monthlytrend.html && echo "✅ MonthlyTrend" || echo "⚠️  MonthlyTrend not found"
+          if [ -d "MonthlyTrend/monthly_charts" ]; then
+            mkdir -p _site/monthly_charts
+            cp -r MonthlyTrend/monthly_charts/. _site/monthly_charts/
+            echo "✅ MonthlyTrend charts → _site/monthly_charts/"
+          fi
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
           [ -f "multibagger_report.html" ] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
