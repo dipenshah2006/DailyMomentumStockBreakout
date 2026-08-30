@@ -43,11 +43,9 @@ LOCAL_FO_CSV        = "india/NSE/nse_fo_list.csv"   # NSE F&O securities list
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
-MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise top N stocks
-# Allow GitHub Actions (or any CI) to cap chart count via env variable
-_chart_override = os.environ.get("MAX_CHART_STOCKS_OVERRIDE", "")
-if _chart_override.isdigit():
-    MAX_CHART_STOCKS = int(_chart_override)
+# Always generate a chart for every symbol that completes analysis.
+# Do not allow CI/environment overrides to silently reduce chart coverage.
+MAX_CHART_STOCKS    = 0
 CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
 GITHUB_CHARTS_BASE  = "charts"   # "https://raw.githubusercontent.com/dipenshah2006/DailyMomentumStockBreakout/main/charts"
 
@@ -134,6 +132,7 @@ import traceback
 import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
+import pytz
 
 import argparse
 import matplotlib
@@ -150,8 +149,9 @@ warnings.filterwarnings("ignore")
 
 CHART_WORKERS = min(12, max(2, (os.cpu_count() or 4)))
 
-RUN_TS      = datetime.now().strftime("%d %b %Y  %H:%M")
-_STAMP      = datetime.now().strftime("%d%m%Y_%H%M")
+IST         = pytz.timezone("Asia/Kolkata")
+RUN_TS      = datetime.now(IST).strftime("%d %b %Y  %H:%M")
+_STAMP      = datetime.now(IST).strftime("%d%m%Y_%H%M")
 START_TS    = RUN_TS
 START_TIME  = time.time()
 OUTPUT_HTML = "rsi_mtf_report_NSE.html"   # fixed name — always overwrites, no duplicates
@@ -769,6 +769,19 @@ def calc_rsi(close, period=14):
     loss  = (-delta).clip(lower=0).ewm(com=period - 1, min_periods=period).mean()
     return 100 - (100 / (1 + gain / (loss + 1e-10)))
 
+def rsi_sma_status(rsi, sma):
+    """Classify RSI(14) versus SMA(14) for a timeframe status tag."""
+    try:
+        rsi, sma = float(rsi), float(sma)
+    except (TypeError, ValueError):
+        return "RANGEBOUND"
+    spread = rsi - sma
+    if spread >= 5 and rsi >= 60:
+        return "STRONG UPTREND"
+    if abs(spread) <= 2 or 45 <= rsi <= 55:
+        return "RANGEBOUND"
+    return "BULLISH" if spread > 0 else "BEARISH"
+
 def calc_macd(close, fast=12, slow=26, sig=9):
     line   = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
     signal = line.ewm(span=sig, adjust=False).mean()
@@ -812,6 +825,48 @@ def resample_ohlcv(df, rule):
         "Open": "first", "High": "max", "Low": "min",
         "Close": "last", "Volume": "sum",
     }).dropna(subset=["Close"])
+
+
+def latest_rsi_crossover(left, right, label):
+    """Return the latest bullish or bearish crossover between two RSI series."""
+    aligned = pd.concat(
+        [pd.to_numeric(left, errors="coerce"),
+         pd.to_numeric(right, errors="coerce")],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if len(aligned) < 2:
+        return None
+
+    latest = None
+    for index in range(1, len(aligned)):
+        previous_diff = float(aligned.iloc[index - 1, 0] - aligned.iloc[index - 1, 1])
+        current_diff = float(aligned.iloc[index, 0] - aligned.iloc[index, 1])
+        direction = None
+        if previous_diff <= 0 and current_diff > 0:
+            direction = "BULLISH"
+        elif previous_diff >= 0 and current_diff < 0:
+            direction = "BEARISH"
+        if direction:
+            latest = {
+                "label": label,
+                "direction": direction,
+                "date": pd.Timestamp(aligned.index[index]).strftime("%d %b %Y"),
+            }
+    return latest
+
+
+def rsi_crossover_tags(rsi_d, rsi_w, rsi_m, daily_index, weekly_index):
+    """Find the latest dated crossover for each D/W/M RSI timeframe pair."""
+    rsi_w_daily = rsi_w.reindex(daily_index, method="ffill")
+    rsi_m_daily = rsi_m.reindex(daily_index, method="ffill")
+    rsi_m_weekly = rsi_m.reindex(weekly_index, method="ffill")
+    crossovers = [
+        latest_rsi_crossover(rsi_d, rsi_w_daily, "Daily RSI / Weekly RSI"),
+        latest_rsi_crossover(rsi_d, rsi_m_daily, "Daily RSI / Monthly RSI"),
+        latest_rsi_crossover(rsi_w, rsi_m_weekly, "Weekly RSI / Monthly RSI"),
+    ]
+    return [event for event in crossovers if event]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1700,6 +1755,9 @@ def analyze_stock(ticker: str) -> dict | None:
             fib_base   = f"Swing High ₹{sw_high:,.0f} → Swing Low ₹{sw_low:,.0f}"
 
         hist_sigs = historical_signals(df["Close"], rsi_d, sma_d)
+        rsi_crossovers = rsi_crossover_tags(
+            rsi_d, rsi_w, rsi_m, df.index, wk.index
+        )
 
         if v_rsi_d > 65:
             entry_note = f"Wait for pullback to RSI~55 zone (~₹{v_close * 0.96:,.0f})"
@@ -1745,6 +1803,7 @@ def analyze_stock(ticker: str) -> dict | None:
         "sw_low": sw_low, "sw_high": sw_high,
         "fib_type": fib_type, "fib_levels": fib_levels, "fib_base": fib_base,
         "hist_sigs": hist_sigs,
+        "rsi_crossovers": rsi_crossovers,
         "ath_price": round(ath_price, 2), "ath_date": ath_date_str,
         "ath_pct": ath_pct, "is_ath": is_ath, "ath_time_str": ath_time_str,
         # ── Explosive breakout fields ──────────────────────────────────────
@@ -1924,7 +1983,9 @@ def generate_chart(data: dict) -> str:
         updated_at = datetime.now().strftime("%d %b %Y %H:%M")
         fig.text(0.995, 0.005, f"Updated: {updated_at}", ha="right", va="bottom", color=TXT, fontsize=9, style="italic")
         os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
-        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
+        # Use the per-run content-hashed path when available.  A stable filename
+        # allows GitHub Pages/CDNs to serve an older PNG indefinitely.
+        chart_path = data.get("_chart_path") or os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
         fig.savefig(chart_path, format="png", dpi=CHART_DPI, bbox_inches="tight", facecolor=BG)
         plt.close(fig)
         return chart_path.replace("\\", "/")
@@ -2079,6 +2140,17 @@ a{color:var(--cyan)}
 .sig-watch{color:var(--gold)}.sig-avoid{color:var(--red)}.sig-neutral{color:var(--sub)}
 .fresh-tag{background:#002d40;color:var(--cyan);border-radius:8px;padding:1px 7px;
            font-size:10px;font-weight:700;border:1px solid #00d4ff44}
+.rsi-cross-tag{display:inline-block;border-radius:8px;padding:1px 7px;
+                font-size:10px;font-weight:700;border:1px solid;margin:1px 2px}
+.rsi-cross-bull{background:#0d3320;color:var(--green);border-color:#26d07c55}
+.rsi-cross-bear{background:#2d0a0a;color:var(--red);border-color:#ff4d6d55}
+.rsi-status-tag{display:inline-block;border-radius:8px;padding:1px 6px;
+                 font-size:9px;font-weight:700;border:1px solid;margin:1px 2px;
+                 white-space:nowrap}
+.rsi-status-strong{background:#063d28;color:#00e676;border-color:#00e67666}
+.rsi-status-bull{background:#0d3320;color:var(--green);border-color:#26d07c55}
+.rsi-status-bear{background:#2d0a0a;color:var(--red);border-color:#ff4d6d55}
+.rsi-status-range{background:#2d2600;color:var(--gold);border-color:#ffd70055}
 .n50-tag{background:#1a0d30;color:var(--purple);border-radius:8px;padding:1px 7px;
          font-size:10px;font-weight:700;border:1px solid #b39ddb44}
 .sme-tag{background:#1a2d0d;color:#4caf50;border-radius:8px;padding:1px 7px;
@@ -2261,7 +2333,7 @@ _JS = """
 
 // STOCKS, CHART_DIR, PAGE_TBL, PAGE_CARDS are injected by Python above this block
 
-const F = { phase:'all', cap:'all', sector:'all', index:'all', fo:'all', signal:'all', ath:'all', search:'' };
+const F = { phase:'all', cap:'all', sector:'all', index:'all', fo:'all', signal:'all', ath:'all', crossover:'all', search:'' };
 let sortKeys   = [];
 let filtered   = [];
 let tblPage    = 0;
@@ -2305,6 +2377,61 @@ function athTag(s){
   return '';
 }
 
+function rsiCrossoverTags(s){
+  return (s.rsi_crossovers||[]).map(x=>{
+    const bull=x.direction==='BULLISH';
+    const [left,right]=(x.label||'RSI / RSI').split(' / ');
+    return `<span class="rsi-cross-tag ${bull?'rsi-cross-bull':'rsi-cross-bear'}">`+
+      `${bull?'▲':'▼'} ${esc(left)} ${bull?'crossed above':'crossed below'} `+
+      `${esc(right)} · ${bull?'Bullish':'Bearish'} · ${esc(x.date)}</span>`;
+  }).join(' ');
+}
+
+function rsiStatusTag(tf,rsi,sma){
+  const spread=Number(rsi)-Number(sma);
+  let status, cls, icon;
+  if(spread>=5 && Number(rsi)>=60){
+    status='STRONG UPTREND'; cls='rsi-status-strong'; icon='🚀';
+  }else if(Math.abs(spread)<=2 || (Number(rsi)>=45 && Number(rsi)<=55)){
+    status='RANGEBOUND'; cls='rsi-status-range'; icon='↔';
+  }else if(spread>0){
+    status='BULLISH'; cls='rsi-status-bull'; icon='▲';
+  }else{
+    status='BEARISH'; cls='rsi-status-bear'; icon='▼';
+  }
+  return `<span class="rsi-status-tag ${cls}" title="${tf} RSI(14) ${rsi} vs SMA(14) ${sma}">${icon} ${tf[0]} ${status}</span>`;
+}
+
+function rsiTimeframeTags(s){
+  return rsiStatusTag('Daily',s.rsi_d,s.sma_d)+
+    rsiStatusTag('Weekly',s.rsi_w,s.sma_w)+
+    rsiStatusTag('Monthly',s.rsi_m,s.sma_m);
+}
+
+const CROSS_LABELS={
+  'any-bullish':'Any bullish crossover',
+  'any-bearish':'Any bearish crossover',
+  'dw-bullish':'Daily / Weekly · Bullish',
+  'dw-bearish':'Daily / Weekly · Bearish',
+  'dm-bullish':'Daily / Monthly · Bullish',
+  'dm-bearish':'Daily / Monthly · Bearish',
+  'wm-bullish':'Weekly / Monthly · Bullish',
+  'wm-bearish':'Weekly / Monthly · Bearish'
+};
+function matchesCrossover(s){
+  if(F.crossover==='all') return true;
+  const [pair,direction]=F.crossover.split('-');
+  return (s.rsi_crossovers||[]).some(x=>{
+    if(direction!=='bullish' && direction!=='bearish') return false;
+    if(direction===(x.direction==='BULLISH'?'bullish':'bearish') &&
+       pair==='any') return true;
+    const key=x.label==='Daily RSI / Weekly RSI'?'dw':
+      x.label==='Daily RSI / Monthly RSI'?'dm':
+      x.label==='Weekly RSI / Monthly RSI'?'wm':'';
+    return key===pair && direction===(x.direction==='BULLISH'?'bullish':'bearish');
+  });
+}
+
 // ── Match stock against current filters ───────────────────────────
 function matchStock(s){
   if(F.phase!=='all'){
@@ -2318,6 +2445,7 @@ function matchStock(s){
   if(F.index !=='all'&&!(s.indices||[]).includes(F.index)) return false;
   if(F.fo    !=='all'&&((F.fo==='fo'&&!s.is_fo)||(F.fo==='cash'&&s.is_fo))) return false;
   if(F.signal!=='all'&&s.sig_cls !==F.signal) return false;
+  if(!matchesCrossover(s)) return false;
   if(F.ath!=='all'){
     const p=s.ath_pct;
     if(F.ath==='at'  &&!s.is_ath)                        return false;
@@ -2408,13 +2536,17 @@ function rowHTML(s){
     ?`<div style="font-size:10px;color:var(--sub)">₹${(s.marketcap/1e7).toLocaleString('en-IN',{maximumFractionDigits:0})} Cr</div>`
     :'<div style="font-size:10px;color:var(--sub)">—</div>';
   const _athTag = athTag(s);
+  const _rsiCrossTags = rsiCrossoverTags(s);
+  const _rsiStatusTags = rsiTimeframeTags(s);
   return `<tr class="sum-row">
   <td><b style="color:var(--cyan)">${esc(s.ticker)}</b> ${frTag}${n50Tag}${smeTag}
+      <div style="margin-top:2px">${_rsiStatusTags}</div>
       <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div>
       <div style="font-size:10px;color:var(--gold);font-weight:600">${fmtINR(s.close)}</div>
       ${foTag?`<span style="margin-left:2px">${foTag}</span>`:''}
       ${tblSecTags?`<div style="margin-top:2px">${tblSecTags}</div>`:''}
       ${tblIdxTags?`<div style="margin-top:2px">${tblIdxTags}</div>`:''}
+      ${_rsiCrossTags?`<div style="margin-top:3px">${_rsiCrossTags}</div>`:''}
       ${_athTag?`<div style="margin-top:3px">${_athTag}</div>`:''}</td>
   <td style="text-align:center">${phaseBadge(s.phase)}</td>
   <td style="text-align:center"><span class="${s.sig_cls}">${esc(s.signal)}</span></td>
@@ -2512,15 +2644,18 @@ function cardSummaryHTML(s,idx){
   const _cSecList=(s.sectors&&s.sectors.length)?s.sectors:((s.sector&&s.sector!=='Unknown')?[s.sector]:[]);
   const secTag=_cSecList.map(l=>`<span class="sector-tag">${esc(l)}</span>`).join(' ');
   const _ath=athTag(s);
+  const _rsiCrossTags=rsiCrossoverTags(s);
+  const _rsiStatusTags=rsiTimeframeTags(s);
   return `<details class="stock-card" data-idx="${idx}">
   <summary>
     <span class="card-arrow">▶</span>
     <span class="card-ticker">${esc(s.ticker)}</span>
+    ${_rsiStatusTags}
     <span class="card-price">${fmtINR(s.close)}</span>
     ${phaseBadge(s.phase)}
     <span class="${s.sig_cls}" style="font-weight:700">${esc(s.signal)}</span>
     <span class="card-score">Score ${s.score}/21</span>
-    ${frTags}${n50Tag}${smeTag}${foTagC}${capTag}${idxTags}${secTag}${_ath?_ath:''}
+     ${frTags}${n50Tag}${smeTag}${foTagC}${capTag}${idxTags}${secTag}${_rsiCrossTags}${_ath?_ath:''}
     <span style="margin-left:auto;color:var(--sub);font-size:11px;text-align:right">
       D ${s.rsi_d} W ${s.rsi_w} M ${s.rsi_m} RSI
       &nbsp;|&nbsp; N50: ${rankPill(s.rank_nifty50,s.rank_nifty50_pos,s.rank_nifty50_of)}
@@ -2697,6 +2832,8 @@ function buildCardBody(s){
     const hit=Object.entries(dotMap).find(([e])=>sig.includes(e));
     return `<div class="sig-item"><div class="sig-dot" style="background:${hit?hit[1]:'#26d07c'}"></div><span>${esc(sig)}</span></div>`;
   }).join('')||'<span style="color:var(--sub)">No active signals</span>';
+  const crossoverHtml=rsiCrossoverTags(s)
+    ?`<div style="margin-bottom:5px">${rsiCrossoverTags(s)}</div>`:'';
 
   // Historical signals
   function retSpan(v){
@@ -2725,7 +2862,7 @@ function buildCardBody(s){
     ${dp('🏆 Rankings',rankHtml,true)}
     ${dp('💰 Market Cap',capHtml)}
     ${dp(fibLbl,fibHtml)}
-    ${dp('⚡ Active Signals',sigsHtml)}
+     ${dp('⚡ Active Signals',crossoverHtml+sigsHtml)}
     <details class="detail-panel" style="grid-column:1/-1">
       <summary>📅 Historical RSI Crossover Signals — recent first</summary>
       <div class="detail-content">${histHtml}</div>
@@ -2767,6 +2904,7 @@ function onDropChange(){
   F.fo    =document.getElementById('foSel')?.value||'all';
   F.signal=document.getElementById('sigSel').value;
   F.ath   =document.getElementById('athSel').value;
+  F.crossover=document.getElementById('crossSel').value;
   applyFilters();
 }
 let _st=null;
@@ -2775,8 +2913,8 @@ function onSearch(v){
   _st=setTimeout(()=>{ F.search=v.trim(); applyFilters(); },220);
 }
 function clearAll(){
-  Object.assign(F,{phase:'all',cap:'all',sector:'all',index:'all',fo:'all',signal:'all',ath:'all',search:''});
-  ['capSel','secSel','idxSel','foSel','sigSel','athSel'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='all';});
+  Object.assign(F,{phase:'all',cap:'all',sector:'all',index:'all',fo:'all',signal:'all',ath:'all',crossover:'all',search:''});
+  ['capSel','secSel','idxSel','foSel','sigSel','athSel','crossSel'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='all';});
   const si=document.getElementById('searchInp');if(si)si.value='';
   document.querySelectorAll('.phase-btn').forEach(b=>b.classList.remove('active'));
   document.querySelector('.phase-btn[data-phase="all"]')?.classList.add('active');
@@ -2798,6 +2936,7 @@ function renderChips(){
   if(F.fo!=='all')     chips.push([`🔮 ${F.fo==='fo'?'F&O Only':'Cash Only'}`,()=>{F.fo='all';const el=document.getElementById('foSel');if(el)el.value='all';}]);
   if(F.signal!=='all') chips.push([SIG_LABELS[F.signal]||F.signal,()=>{F.signal='all';document.getElementById('sigSel').value='all';}]);
   if(F.ath!=='all')    chips.push([ATH_LABELS[F.ath]||F.ath,()=>{F.ath='all';document.getElementById('athSel').value='all';}]);
+  if(F.crossover!=='all') chips.push([`🔀 ${CROSS_LABELS[F.crossover]||F.crossover}`,()=>{F.crossover='all';document.getElementById('crossSel').value='all';}]);
   if(F.search)         chips.push([`"${F.search}"`,()=>{F.search='';document.getElementById('searchInp').value='';}]);
   c.innerHTML=chips.map((ch,i)=>
     `<span class="chip">${esc(ch[0])} <span class="x" onclick="(${chips[i][1].toString()})();applyFilters()">✕</span></span>`
@@ -2845,13 +2984,21 @@ def _build_detail_panels(d: dict) -> str:
 
     # RSI table
     def rsi_row(tf, rv, sv, is_fresh_tf):
-        cls = "g" if rv > sv else "r"
-        arr = "▲" if rv > sv else "▼"
+        status = rsi_sma_status(rv, sv)
+        status_cls = {
+            "STRONG UPTREND": "rsi-status-strong",
+            "BULLISH": "rsi-status-bull",
+            "BEARISH": "rsi-status-bear",
+            "RANGEBOUND": "rsi-status-range",
+        }[status]
+        icon = {"STRONG UPTREND": "🚀", "BULLISH": "▲",
+                "BEARISH": "▼", "RANGEBOUND": "↔"}[status]
+        cls = "g" if status in ("STRONG UPTREND", "BULLISH") else "r" if status == "BEARISH" else ""
         fr  = ' <span class="fresh-tag">FRESH</span>' if is_fresh_tf else ""
         return (f'<tr><td>{tf}</td>'
                 f'<td class="{cls}"><b>{rv}</b></td>'
                 f'<td style="font-size:10px;color:var(--sub)">{sv}</td>'
-                f'<td class="{cls}">{arr}{"ABOVE" if rv>sv else "BELOW"}{fr}</td></tr>')
+                f'<td><span class="rsi-status-tag {status_cls}">{icon} {status}</span>{fr}</td></tr>')
 
     def cci_row(tf, v):
         cls = "g" if v > 0 else "r"
@@ -2916,6 +3063,16 @@ def _build_detail_panels(d: dict) -> str:
         f'<span>{s}</span></div>'
         for s in d["sig_list"]
     ) or '<span style="color:var(--sub)">No active signals</span>'
+    crossover_html = "".join(
+        f'<span class="rsi-cross-tag '
+        f'{"rsi-cross-bull" if event["direction"] == "BULLISH" else "rsi-cross-bear"}">'
+        f'{"▲" if event["direction"] == "BULLISH" else "▼"} '
+        f'{event["label"].replace(" / ", " crossed above " if event["direction"] == "BULLISH" else " crossed below ")} '
+        f'· {event["direction"].title()} · {event["date"]}</span>'
+        for event in d.get("rsi_crossovers", [])
+    )
+    if crossover_html:
+        crossover_html = f'<div style="margin-bottom:5px">{crossover_html}</div>'
 
     hist_rows = "".join(
         f'<tr><td>{s["date"]}</td>'
@@ -2976,7 +3133,7 @@ def _build_detail_panels(d: dict) -> str:
       {dp("🏆 Rankings",                         rank_html, True)}
       {dp("💰 Market Cap",                       cap_html)}
       {dp(fib_lbl,                               fib_html)}
-      {dp("⚡ Active Signals",                   sigs_html)}
+      {dp("⚡ Active Signals",                   crossover_html + sigs_html)}
       <details class="detail-panel" style="grid-column:1/-1">
         <summary>📅 Historical RSI Crossover Signals — recent first</summary>
         <div class="detail-content">{hist_html}</div>
@@ -3361,7 +3518,7 @@ _HTML_FIELDS = {
     'sell_conds','score','phase','signal','sig_cls','fresh_d','fresh_d_bars','fresh_w',
     'fresh_w_bars','donchian_d','donchian_w','donchian_m','is_nifty50','is_sme','is_fo','sector','sectors','indices','marketcap','cap_cat','cap_cls',
     'rank_nifty50','rank_nifty50_pos','rank_nifty50_of','rank_universe','rank_univ_pos',
-    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','has_chart',
+    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','rsi_crossovers','has_chart','chart_url',
     'ath_price','ath_date','ath_pct','is_ath','ath_time_str',
     'explosive_score','explosive_signals','vol_ratio',
     'bb_upper','bb_mid','bb_lower','bb_pct','bb_slope',
@@ -3373,8 +3530,7 @@ def _html_safe_stock(d: dict) -> dict:
     rec = {k: d[k] for k in _HTML_FIELDS if k in d}
     # Keep chart file reference (don't embed base64 — charts loaded on demand from file)
     if d.get('has_chart'):
-        chart_path = f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
-        rec['chart_path'] = chart_path
+        rec['chart_path'] = d.get('chart_url') or f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
     return rec
 
 
@@ -3414,6 +3570,9 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
         d["cap_cat"]   = cap_cat
         d["cap_cls"]   = cap_cls
         d["has_chart"] = d["ticker"] in chart_tickers
+        if d["has_chart"]:
+            chart_file = os.path.basename(chart_data[d["ticker"]])
+            d["chart_url"] = f"{GITHUB_CHARTS_BASE}/{chart_file}"
 
     # ── Serialize to compact JSON (only the fields needed by HTML/JS) ───────
     safe_results = [_html_safe_stock(d) for d in all_results]
@@ -3468,6 +3627,17 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
           <option value="w10">🟡 Within 10% of ATH ({n_ath_10})</option>
           <option value="w20">🟠 Within 20% of ATH ({n_ath_20})</option>
           <option value="far">📉 More than 20% below ATH ({n_ath_far})</option>
+        </select>
+        <select id="crossSel" class="filter-select" onchange="onDropChange()">
+          <option value="all">🔀 All RSI Crossovers</option>
+          <option value="any-bullish">🟢 Any Bullish Crossover</option>
+          <option value="any-bearish">🔴 Any Bearish Crossover</option>
+          <option value="dw-bullish">D/W Bullish</option>
+          <option value="dw-bearish">D/W Bearish</option>
+          <option value="dm-bullish">D/M Bullish</option>
+          <option value="dm-bearish">D/M Bearish</option>
+          <option value="wm-bullish">W/M Bullish</option>
+          <option value="wm-bearish">W/M Bearish</option>
         </select>
         <button class="clear-btn" onclick="clearAll()">✖ Clear</button>
         <span class="results-info">Showing <b id="rc">{total}</b> of {total} stocks</span>
@@ -3652,20 +3822,18 @@ def main(force_charts: bool = False):
     os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
     print(f"   Generating charts for {'all' if MAX_CHART_STOCKS <= 0 else 'top'} {len(chart_tickers)} stocks...")
 
-    meta = _load_chart_cache_meta()
     stale = []
-    cached = 0
     for d in chart_candidates:
         ticker = d["ticker"]
-        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png").replace("\\", "/")
         chart_hash = _compute_chart_hash(d)
-        if not force_charts and chart_hash and meta.get(ticker, {}).get("hash") == chart_hash and os.path.exists(chart_path):
-            chart_data[ticker] = chart_path
-            cached += 1
-            continue
+        # The content hash makes every changed chart a new URL, permanently
+        # avoiding browser/CDN cache collisions between report runs.
+        chart_name = f"{ticker}_{chart_hash[:16] or 'latest'}.png"
+        chart_path = os.path.join(CHART_OUTPUT_DIR, chart_name).replace("\\", "/")
+        d["_chart_path"] = chart_path
         stale.append((d, chart_hash, chart_path))
 
-    print(f"   Reusing {cached}/{len(chart_tickers)} cached charts")
+    print(f"   Chart cache disabled — regenerating {len(stale)}/{len(chart_tickers)} charts")
 
     if stale:
         workers = min(CHART_WORKERS, len(stale))
@@ -3683,17 +3851,14 @@ def main(force_charts: bool = False):
                     log_error(ticker, get_company_name(ticker), "CHART-PARALLEL", exc)
                 if generated_path:
                     chart_data[ticker] = generated_path
-                    meta[ticker] = {"hash": chart_hash, "updated_at": datetime.now().strftime("%d %b %Y %H:%M")}
-                elif os.path.exists(chart_path):
-                    chart_data[ticker] = chart_path
+                    d["_chart_path"] = generated_path
                 else:
                     print(f"\n   ⚠️ Chart failed for {ticker} — see {ERROR_LOG}")
                 sys.stdout.write(f"\r   Charts completed: {completed}/{len(stale)}")
                 sys.stdout.flush()
         print()
-        _save_chart_cache_meta(meta)
     else:
-        print("   No charts to generate.")
+        print("   No charts selected.")
 
     print(f"   {len(chart_data)}/{len(chart_tickers)} charts generated")
 
@@ -3708,7 +3873,8 @@ def main(force_charts: bool = False):
     print(f"   Fresh breakouts (Daily): {sum(1 for d in results if d['fresh_d'])}")
     print(f"   Fresh breakouts (Weekly): {sum(1 for d in results if d['fresh_w'])}\n")
 
-    html = build_html_report(all_light, chart_data, RUN_TS, len(results))
+    report_ts = datetime.now(IST).strftime("%d %b %Y  %H:%M")
+    html = build_html_report(all_light, chart_data, report_ts, len(results))
 
     # Remove any old timestamped reports from previous runs
     import glob as _glob

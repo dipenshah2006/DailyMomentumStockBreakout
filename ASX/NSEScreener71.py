@@ -48,6 +48,7 @@ LOCAL_FO_CSV        = os.path.join(REPO_ROOT, "india", "NSE", "nse_fo_list.csv")
 # ASX (Australian Securities Exchange) stocks
 # CSV columns expected: "ACT Symbol", "Company name", "GICS industry group"
 LOCAL_ASX_CSV       = os.path.join(SCRIPT_DIR, "nyse-listed.csv")
+ASX_ONLY            = True          # this report must not mix in NSE/SME symbols
 ASX_CHART_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "charts", "asx")   # ASX chart PNGs
 
 DATA_PERIOD         = "max"
@@ -534,7 +535,7 @@ def _batch_download(tickers: list[str], period: str | None = None,
         "progress": False,
         "auto_adjust": True,
         "group_by": "ticker",
-        "threads": True,
+        "threads": False,
     }
     if start and end:
         args["start"] = start
@@ -545,24 +546,37 @@ def _batch_download(tickers: list[str], period: str | None = None,
         args["period"] = DATA_PERIOD
 
     import io as _io
-    _old_stderr = sys.stderr
-    _capture_stderr = _io.StringIO()
-    sys.stderr = _capture_stderr   # silence yfinance "Failed downloads" noise
-    try:
-        raw = yf.download(**args)
-    except Exception as e:
-        sys.stderr = _old_stderr
-        label = f"{period or f'{start}:{end}'}"
-        print(f"\n  [!] Batch download error ({len(tickers)} tickers, {label}): {e}")
-        return {}
-    finally:
-        _yf_noise = _capture_stderr.getvalue()
-        sys.stderr = _old_stderr
-        for _line in _yf_noise.splitlines():
-            if _line.strip() and "YFTzMissing" not in _line and "Failed downloads" not in _line:
-                print(f"  [yf] {_line}", file=sys.stderr)
+    label = f"{period or f'{start}:{end}'}"
+    raw = pd.DataFrame()
+    last_error = None
+    for attempt in range(1, 4):
+        _old_stderr = sys.stderr
+        _capture_stderr = _io.StringIO()
+        sys.stderr = _capture_stderr   # silence yfinance "Failed downloads" noise
+        try:
+            raw = yf.download(**args)
+            last_error = None
+        except Exception as e:
+            raw = pd.DataFrame()
+            last_error = e
+        finally:
+            _yf_noise = _capture_stderr.getvalue()
+            sys.stderr = _old_stderr
+            for _line in _yf_noise.splitlines():
+                if _line.strip() and "YFTzMissing" not in _line and "Failed downloads" not in _line:
+                    print(f"  [yf] {_line}", file=sys.stderr)
+
+        if not raw.empty:
+            break
+        if attempt < 3:
+            wait = 10 * attempt
+            print(f"\n  [!] Empty Yahoo response for batch ({len(tickers)} tickers, {label}); "
+                  f"retrying in {wait}s ({attempt}/3)…")
+            time.sleep(wait)
 
     if raw.empty:
+        if last_error:
+            print(f"\n  [!] Batch download error ({len(tickers)} tickers, {label}): {last_error}")
         return {}
 
     for ticker in tickers:
@@ -1491,7 +1505,7 @@ def load_universe() -> list[str]:
     all_tickers = []
 
     # Load NSE EQ stocks
-    if os.path.exists(LOCAL_NSE_CSV) and os.path.getsize(LOCAL_NSE_CSV) > 512:
+    if not ASX_ONLY and os.path.exists(LOCAL_NSE_CSV) and os.path.getsize(LOCAL_NSE_CSV) > 512:
         try:
             with open(LOCAL_NSE_CSV, encoding="utf-8", errors="replace") as f:
                 raw = f.read()
@@ -1504,7 +1518,7 @@ def load_universe() -> list[str]:
             print(f"  [!] Local NSE CSV error: {e}")
 
     # Load NSE SME stocks
-    if os.path.exists(LOCAL_SME_CSV):
+    if not ASX_ONLY and os.path.exists(LOCAL_SME_CSV):
         try:
             with open(LOCAL_SME_CSV, encoding="utf-8", errors="replace") as f:
                 raw = f.read()
@@ -1546,6 +1560,11 @@ def load_universe() -> list[str]:
 
     if all_tickers:
         return list(dict.fromkeys(all_tickers))  # Remove duplicates while preserving order
+
+    # This is a dedicated ASX report; never substitute an NSE built-in list.
+    if ASX_ONLY:
+        print("  ❌ No ASX symbols available — check ASX/nyse-listed.csv")
+        return []
 
     # Fallback to live download if local files don't exist
     try:

@@ -33,7 +33,8 @@ permissions:
 
 concurrency:
   group: github-pages
-  cancel-in-progress: false
+  # A stale long-running scan must not block a corrected manual run.
+  cancel-in-progress: true
 
 # ── Each report runs in its own parallel job — a failure or timeout
 # ── in one does NOT affect the others. The deploy job always runs
@@ -225,6 +226,19 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
 
+      # Commit rocket_scan_latest.html back to repo so it survives between
+      # runs and is always available in the checkout during Pages deploy.
+      - name: Commit rocket_scan_latest.html to repo
+        if: steps.run.outcome == 'success'
+        run: |
+          git config user.name  "NSE Bot"
+          git config user.email "bot@noreply"
+          git pull --rebase --autostash origin main
+          git add rocket_scan_latest.html
+          git diff --cached --quiet \
+            && echo "No changes in rocket_scan_latest.html — skipping commit" \
+            || (git commit -m "chore: update rocket_scan_latest.html [skip ci]" && git push)
+
   # ═══════════════════════════════════════════════════════════════
   #  4. F&O Multi-Indicator Scanner
   # ═══════════════════════════════════════════════════════════════
@@ -371,29 +385,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install yfinance pandas numpy matplotlib requests openpyxl
+          pip install --upgrade pip
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Create directories
-        run: mkdir -p india/NSE/NSECash india/NSE/NSESME charts/asx
+        run: mkdir -p ASX/charts/asx
 
-      - name: Download NSE equity list
-        run: |
-          curl -sL \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-            -H "Referer: https://www.nseindia.com/" \
-            --retry 3 --retry-delay 5 --max-time 30 \
-            "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv" \
-            -o india/NSE/NSECash/EQUITY_L.csv \
-          && echo "✅ EQUITY_L.csv: $(wc -l < india/NSE/NSECash/EQUITY_L.csv) lines" \
-          || echo "⚠️  NSE CSV blocked — using built-in ticker list"
+      # Keep the ASX cache between runs. Without this, every run downloads the
+      # whole universe from Yahoo again and is much more likely to be rate limited.
+      - name: Restore ASX data cache
+        uses: actions/cache@v4
+        with:
+          path: asx_stock_cache.pkl
+          key: asx-stock-cache-${{ runner.os }}-${{ hashFiles('ASX/NSEScreener71.py', 'ASX/nyse-listed.csv') }}
+          restore-keys: |
+            asx-stock-cache-${{ runner.os }}-
 
       - name: Run ASX Screener
         id: run
@@ -402,14 +416,35 @@ jobs:
           PYTHONUNBUFFERED: '1'
         run: python ASX/NSEScreener71.py
 
+      # Never publish a green-but-empty report when Yahoo has rate-limited the job.
+      - name: Validate ASX report contains data
+        id: validate
+        if: steps.run.outcome == 'success'
+        run: |
+          test -s asx_report_NSE.html
+          if ! grep -Eq 'Showing <b id="rc">[1-9][0-9]*</b> of' asx_report_NSE.html; then
+            echo "❌ ASX report contains zero analysed stocks; refusing to publish it"
+            exit 1
+          fi
+          echo "✅ ASX report contains analysed stock data"
+
       - name: Upload ASX HTML
-        if: always()
+        if: steps.validate.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: asx-html
           path: asx_report_NSE.html
           retention-days: 3
-          if-no-files-found: warn
+          if-no-files-found: error
+
+      - name: Upload ASX error log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asx-error-${{ github.run_number }}
+          path: error_log_*.txt
+          retention-days: 7
+          if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
   #  7. USA / NYSE Screener
@@ -424,15 +459,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install yfinance pandas numpy matplotlib requests openpyxl
+          pip install --upgrade pip
+          pip install yfinance pandas numpy matplotlib requests openpyxl
 
       - name: Create directories
         run: mkdir -p USAs/charts
@@ -502,6 +538,13 @@ jobs:
           name: rsi-html
           path: .
         continue-on-error: true
+
+      - name: Clear previous chart staging
+        run: |
+          # Never fall back to committed/old PNGs when assembling Pages.
+          # Each report publishes content-hashed chart filenames.
+          rm -rf charts
+          mkdir -p charts
 
       - name: Download RSI Charts
         uses: actions/download-artifact@v4
@@ -609,11 +652,14 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: _site
-
+          
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Refresh NIFTY Indices Master
         if: needs.rsi-report.result == 'success'

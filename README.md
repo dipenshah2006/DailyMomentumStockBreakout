@@ -1,38 +1,12 @@
 # 📈 DailyMomentumStockBreakout
 
-Automated NSE stock analysis toolkit that generates daily HTML reports and emails them every morning — covering RSI Multi-Timeframe, ATH Breakouts, Multibagger picks, Rocket Scanner, F&O Multi-Indicator Scanner, and Intraday breakouts for Indian equity markets.
+Automated NSE stock analysis toolkit that generates daily HTML reports and emails them every evening — covering RSI Multi-Timeframe, ATH Breakouts, Multibagger picks, Rocket Scanner, F&O Multi-Indicator Scanner, NSE Index Dashboard, ASX, USA/NYSE, Intraday, and Weekly Digest reports.
 
 ---
 
-## 🔗 Live Reports — All URLs
+## 📡 Live Reports — GitHub Pages
 
-### 🖥️ Replit Dashboard (live server — admin, subscribers, manual run)
-
-The Flask dashboard runs on Replit and provides admin controls not available on GitHub Pages.
-
-| Page | URL |
-|------|-----|
-| 📊 Dashboard (main RSI report) | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ |
-| 📊 F&O Multi-Indicator Scanner | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/fo |
-| 💎 Multibagger Report | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/multibagger |
-| 🏆 ATH Breakout | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/ath |
-| 🚀 Rocket Scanner | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/rocket |
-| ⚡ Intraday Breakout | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/intraday |
-| ⚙️ Admin panel | https://6c5369b3-24e9-4ba5-910e-569b6fb2817d-00-2jxkdi3uldjd2.sisko.replit.dev/subscribers |
-
-**Admin panel** (`/subscribers`) requires the `ADMIN_PASSWORD` secret. From there you can:
-- View, add, remove, and bulk-import subscribers
-- Export the mailing list as CSV
-- Trigger a full NSE report run manually
-- Send the latest report email to all subscribers (or just yourself for a test preview)
-
-> **Note:** The Replit URL is active while the Replit workflow is running. For always-on access, use the **Publish** button in Replit to get a permanent `.replit.app` deployment URL.
-
----
-
-### 📡 GitHub Pages (always-on, no login needed)
-
-Updated fresh every day at **5:00 AM IST** via GitHub Actions.
+Updated automatically by GitHub Actions. No login required — bookmark and share these stable URLs.
 
 | Report | GitHub Pages URL |
 |--------|-----------------|
@@ -42,6 +16,10 @@ Updated fresh every day at **5:00 AM IST** via GitHub Actions.
 | 🏆 ATH Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/ath.html |
 | 🚀 Rocket Scanner | https://dipenshah2006.github.io/DailyMomentumStockBreakout/rocket.html |
 | ⚡ Intraday Breakout | https://dipenshah2006.github.io/DailyMomentumStockBreakout/intraday.html |
+| 📊 NSE Index Dashboard | https://dipenshah2006.github.io/DailyMomentumStockBreakout/index-dashboard.html |
+| 🦘 ASX Screener | https://dipenshah2006.github.io/DailyMomentumStockBreakout/asx.html |
+| 🇺🇸 USA / NYSE Screener | https://dipenshah2006.github.io/DailyMomentumStockBreakout/usa.html |
+| 📆 Weekly Market Digest | https://dipenshah2006.github.io/DailyMomentumStockBreakout/weekly-digest.html |
 
 > **Tip:** GitHub Pages is the fastest way to share reports — no login required, bookmark-friendly, always shows the latest run.
 
@@ -49,15 +27,18 @@ Updated fresh every day at **5:00 AM IST** via GitHub Actions.
 
 ## 📅 Automated Schedule
 
-All morning reports run via GitHub Actions at **5:00 AM IST** daily.
+Reports run through GitHub Actions and are published to the GitHub Pages URLs above.
 
 | Time (IST) | Report | Ready ~by |
 |-----------|--------|-----------|
-| 5:00 AM | 📈 RSI MTF Breakout (2657 stocks) | 5:10–5:15 AM |
-| 5:00 AM | 🏆 ATH Breakout | 5:15 AM |
-| 5:00 AM | 💎 Multibagger | 5:20 AM |
-| 5:00 AM | 🚀 Rocket Scanner | 5:25 AM |
-| 5:00 AM | 📊 **F&O Scanner** (~212 stocks) | **5:30–5:40 AM** |
+| 9:00 PM | 📈 RSI MTF Breakout (2657 stocks) | 9:15–9:30 PM |
+| 9:00 PM | 🏆 ATH Breakout | 9:15 PM |
+| 9:00 PM | 🚀 Rocket Scanner | 9:15 PM |
+| 9:00 PM | 📊 F&O Scanner (~212 stocks) | 9:30–9:40 PM |
+| 9:00 PM | 📊 NSE Index Dashboard | 9:15 PM |
+| 9:00 PM | 🦘 ASX Screener | Varies — self-hosted runner |
+| 9:00 PM | 🇺🇸 USA / NYSE Screener | Varies — self-hosted runner |
+| Saturday 5:00 AM | 📆 Weekly Market Digest | 5:15–5:30 AM |
 | 9:30 AM (Mon–Fri) | ⚡ Intraday Breakout | 9:35 AM |
 
 All reports are emailed to everyone listed in `email_recipients.txt`.
