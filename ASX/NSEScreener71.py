@@ -63,6 +63,17 @@ CHART_OUTPUT_DIR    = os.path.join(REPO_ROOT, "charts")   # repo-root charts/ fo
 CHART_BARS          = 90        # bars per chart — 90 days is plenty; 120 adds ~25% render time
 CHART_DPI           = 120       # Good quality; 200 is overkill and ~3x slower
 
+
+def chart_web_path(ticker: str) -> str:
+    """Return the chart path as it is published alongside the HTML report."""
+    chart_subdir = "asx" if ticker in _ASX_STOCKS else ""
+    parts = [GITHUB_CHARTS_BASE]
+    if chart_subdir:
+        parts.append(chart_subdir)
+    parts.append(f"{ticker}.png")
+    return "/".join(parts)
+
+
 FRESH_DAYS_D        = 3
 FRESH_WEEKS_W       = 2
 
@@ -3354,7 +3365,7 @@ def build_stock_card(d: dict, has_chart: bool) -> str:
 
     if has_chart:
         chart_html = (f'<div class="chart-wrap">'
-                      f'<img class="lazy-chart" data-src="{CHART_OUTPUT_DIR}/{d["ticker"]}.png" '
+                      f'<img class="lazy-chart" data-src="{chart_web_path(d["ticker"])}" '
                       f'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" '
                       f'alt="{d["ticker"]} chart" loading="lazy">'
                       f'</div>')
@@ -3497,9 +3508,7 @@ def _html_safe_stock(d: dict) -> dict:
     rec = {k: d[k] for k in _HTML_FIELDS if k in d}
     # Keep chart file reference (don't embed base64 — charts loaded on demand from file)
     if d.get('has_chart'):
-        _cdir = ASX_CHART_OUTPUT_DIR if d['ticker'] in _ASX_STOCKS else CHART_OUTPUT_DIR
-        chart_path = os.path.join(_cdir, f"{d['ticker']}.png").replace("\\", "/")
-        rec['chart_path'] = chart_path
+        rec['chart_path'] = chart_web_path(d['ticker'])
     return rec
 
 
@@ -3881,7 +3890,7 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
 
   <script>
 const STOCKS={stocks_json};
-const CHART_DIR={json.dumps(CHART_OUTPUT_DIR)};
+const CHART_DIR={json.dumps(GITHUB_CHARTS_BASE)};
 const PAGE_TBL={PAGE_TBL};
 const PAGE_CARDS={PAGE_CARDS};
 {_JS}
@@ -4006,10 +4015,10 @@ def main(force_charts: bool = False):
                 except Exception as exc:
                     generated_path = ""
                     log_error(ticker, get_company_name(ticker), "CHART-PARALLEL", exc)
-                if generated_path:
+                if generated_path and os.path.isfile(generated_path):
                     chart_data[ticker] = generated_path
                     meta[ticker] = {"hash": chart_hash, "updated_at": datetime.now().strftime("%d %b %Y %H:%M")}
-                elif os.path.exists(chart_path):
+                elif os.path.isfile(chart_path):
                     chart_data[ticker] = chart_path
                 else:
                     print(f"\n   ⚠️ Chart failed for {ticker} — see {ERROR_LOG}")

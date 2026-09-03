@@ -428,8 +428,74 @@ jobs:
           fi
           echo "✅ ASX report contains analysed stock data"
 
-      - name: Upload ASX HTML
+      # The report stores deployed chart URLs in its STOCKS JSON payload.
+      # Verify each one maps to a PNG in the directory uploaded below.
+      - name: Validate ASX chart references
+        id: validate_charts
         if: steps.validate.outcome == 'success'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          html = Path("asx_report_NSE.html").read_text(encoding="utf-8")
+          match = re.search(r'const STOCKS=(.*?);\nconst CHART_DIR=', html, re.S)
+          if not match:
+              raise SystemExit("ASX report has no embedded STOCKS payload")
+
+          stocks = json.loads(match.group(1))
+          chart_paths = []
+          missing_paths = []
+          for stock in stocks:
+              if stock.get("has_chart"):
+                  chart_path = stock.get("chart_path")
+                  if chart_path:
+                      chart_paths.append(chart_path)
+                  else:
+                      missing_paths.append(stock.get("ticker", "<unknown>"))
+
+          if not chart_paths:
+              raise SystemExit("ASX report contains no published chart paths")
+          if missing_paths:
+              raise SystemExit(
+                  "ASX report marks stocks as charted without chart_path: "
+                  + ", ".join(missing_paths)
+              )
+
+          expected_prefix = Path("charts") / "asx"
+          invalid_paths = []
+          missing_files = []
+          for chart_path in chart_paths:
+              published_path = Path(chart_path)
+              if (
+                  published_path.parent != expected_prefix
+                  or published_path.suffix.lower() != ".png"
+              ):
+                  invalid_paths.append(chart_path)
+                  continue
+
+              source_path = Path("ASX") / published_path
+              if not source_path.is_file():
+                  missing_files.append(f"{chart_path} -> {source_path}")
+
+          if invalid_paths:
+              raise SystemExit(
+                  "ASX report contains chart paths outside charts/asx: "
+                  + ", ".join(invalid_paths)
+              )
+          if missing_files:
+              raise SystemExit(
+                  "ASX report references missing chart PNGs:\n  "
+                  + "\n  ".join(missing_files)
+              )
+
+          print(f"✅ ASX report chart references verified: {len(chart_paths)} PNGs")
+          PY
+
+      - name: Upload ASX HTML
+        if: steps.validate_charts.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: asx-html
@@ -438,7 +504,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload ASX Charts
-        if: steps.validate.outcome == 'success'
+        if: steps.validate_charts.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: asx-charts
