@@ -437,6 +437,15 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+      - name: Upload ASX Charts
+        if: steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: asx-charts
+          path: ASX/charts/asx/
+          retention-days: 3
+          if-no-files-found: error
+
       - name: Upload ASX error log
         if: always()
         uses: actions/upload-artifact@v4
@@ -807,6 +816,13 @@ jobs:
         with:
           name: usa-charts
           path: charts
+        continue-on-error: true
+
+      - name: Download ASX Charts
+        uses: actions/download-artifact@v4
+        with:
+          name: asx-charts
+          path: charts/asx
         continue-on-error: true
 
       - name: Download MonthlyTrend report and charts
