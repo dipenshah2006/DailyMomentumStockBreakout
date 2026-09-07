@@ -26,6 +26,10 @@ app.secret_key = _session_secret
 
 SCRIPT = 'rsi_mtf_report_nse.py'
 IST = pytz.timezone('Asia/Kolkata')
+# A report older than one scheduled daily run is not the current report.
+# Keeping this check here prevents an old generated HTML file from suppressing
+# the first fresh run after the app restarts.
+REPORT_MAX_AGE_SECONDS = 26 * 60 * 60
 
 job_lock = threading.Lock()
 job_running = False
@@ -87,9 +91,17 @@ def _push_to_github(commit_msg):
 
 def latest_report():
     files = glob.glob('rsi_mtf_report_NSE*.html') + glob.glob('rsi_mtf_report_*.html')
-    if not files:
+    fresh_files = []
+    now = time.time()
+    for path in set(files):
+        try:
+            if os.path.getsize(path) > 0 and now - os.path.getmtime(path) <= REPORT_MAX_AGE_SECONDS:
+                fresh_files.append(path)
+        except OSError:
+            continue
+    if not fresh_files:
         return None
-    return max(files, key=os.path.getmtime)
+    return max(fresh_files, key=os.path.getmtime)
 
 
 def run_nse_report():
