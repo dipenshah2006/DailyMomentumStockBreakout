@@ -11,7 +11,7 @@ import csv
 import time
 import warnings
 import pickle
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -35,6 +35,70 @@ CACHE_MAX_AGE_H = 6           # hours before cache expires
 # If present, DataFrame lookups skip yfinance entirely for cached tickers.
 RSI_CACHE_FILE = "stock_data_cache.pkl"
 _RSI_CACHE: dict = {}   # populated by _preload_rsi_cache() in fetch_all()
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _expected_last_trading_date():
+    """Return the latest completed daily bar normally available to yfinance."""
+    today = datetime.now(IST).date()
+    if today.weekday() == 0:      # Monday -> Friday
+        return today - timedelta(days=3)
+    if today.weekday() == 5:      # Saturday -> Friday
+        return today - timedelta(days=1)
+    if today.weekday() == 6:      # Sunday -> Friday
+        return today - timedelta(days=2)
+    return today - timedelta(days=1)
+
+
+def _df_last_date(df):
+    """Return a cached/downloaded DataFrame's last date as an ISO string."""
+    try:
+        return pd.Timestamp(df.index[-1]).date().isoformat()
+    except Exception:
+        return ""
+
+
+def _clean_download(df, yf_sym):
+    """Normalize a single-ticker yfinance response to OHLCV columns."""
+    if df is None or df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        levels = [set(df.columns.get_level_values(i)) for i in range(df.columns.nlevels)]
+        if yf_sym in levels[0]:
+            df = df.xs(yf_sym, axis=1, level=0)
+        elif yf_sym in levels[-1]:
+            df = df.xs(yf_sym, axis=1, level=df.columns.nlevels - 1)
+        else:
+            df.columns = df.columns.get_level_values(0)
+    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    if "Close" not in cols:
+        return None
+    return df[cols].dropna()
+
+
+def _refresh_stale_cached_df(yf_sym, df):
+    """Append the latest daily bars when the shared RSI cache is behind."""
+    if not df.empty and _df_last_date(df) >= _expected_last_trading_date().isoformat():
+        return df
+
+    try:
+        last = pd.Timestamp(df.index[-1]).date()
+        start = last + timedelta(days=1)
+        fresh = yf.download(
+            yf_sym,
+            start=start.isoformat(),
+            end=(datetime.now(IST).date() + timedelta(days=1)).isoformat(),
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+        )
+        fresh = _clean_download(fresh, yf_sym)
+        if fresh is not None and not fresh.empty:
+            merged = pd.concat([df, fresh])
+            return merged[~merged.index.duplicated(keep="last")].sort_index()
+    except Exception:
+        pass
+    return None
 
 
 def _preload_rsi_cache() -> int:
@@ -80,6 +144,14 @@ def _df_from_rsi_cache(yf_sym: str):
     if "Close" not in cols:
         return None
     return df[cols].dropna()
+
+
+def _cached_result_is_current(result):
+    """Do not reuse a calculated ATH row whose price date is stale."""
+    return (
+        isinstance(result, dict)
+        and result.get("price_date", "") >= _expected_last_trading_date().isoformat()
+    )
 
 IST_OFFSET = "+05:30"
 
@@ -159,12 +231,14 @@ def calc_rsi(series, period=14):
 # ── Fetch & analyse one stock ─────────────────────────────────────────────────
 def analyse(symbol, name, cache):
     yf_sym = symbol + ".NS"
-    if yf_sym in cache:
+    if yf_sym in cache and _cached_result_is_current(cache[yf_sym]):
         return cache[yf_sym]
 
     try:
         # Try RSI cache first — avoids a yfinance call for every cached ticker
         df = _df_from_rsi_cache(yf_sym)
+        if df is not None:
+            df = _refresh_stale_cached_df(yf_sym, df)
         if df is None:
             end   = datetime.today()
             start = end - timedelta(days=DATA_YEARS * 365 + 60)
@@ -259,6 +333,8 @@ def analyse(symbol, name, cache):
             "name":         name[:35],
             "yf_sym":       yf_sym,
             "close":        round(last_close, 2),
+            "price_date":   last_date.date().isoformat(),
+            "price_asof":   last_date.strftime("%d %b %Y"),
             "ath_price":    round(ath_price, 2),
             "ath_pct":      ath_pct,
             "is_ath":       is_ath,
@@ -414,7 +490,7 @@ def build_html(results, run_ts):
     <b style="color:#e6edf3">{r['symbol']}</b><br>
     <span style="color:#8b949e;font-size:10px">{r['name']}</span>
   </td>
-  <td style="text-align:right">{fmt_inr(r['close'])}</td>
+  <td style="text-align:right">{fmt_inr(r['close'])}<br><span style="color:#8b949e;font-size:10px">as of {r.get('price_asof', r.get('price_date', '—'))}</span></td>
   <td style="text-align:center">{ath_badge(r)}</td>
   <td style="text-align:right;color:{ath_pct_clr};font-weight:700;font-size:13px">{ath_pct_str}</td>
   <td style="text-align:right;color:#8b949e;font-size:11px">{fmt_inr(r['ath_price'])}<br><span style="font-size:10px">{r['ath_date']}</span></td>
@@ -529,7 +605,7 @@ tr:hover td{{background:#161b2288}}
 <tr>
   <th onclick="thSort(0)">#</th>
   <th onclick="thSort(1)" style="text-align:left">Ticker / Company</th>
-  <th onclick="thSort(2)">Price</th>
+  <th onclick="thSort(2)">Latest Price</th>
   <th onclick="thSort(3)" style="text-align:center">ATH Status</th>
   <th onclick="thSort(4)" title="Current price % above or below ATH (green = above, red = below)">% vs ATH</th>
   <th onclick="thSort(5)">ATH Price</th>
