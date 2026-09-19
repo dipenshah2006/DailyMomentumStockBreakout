@@ -10,7 +10,7 @@
 ║    • Native <details> expand/collapse — no JS needed, instant               ║
 ╚═════════════════════════════════════════════════════════════════════════════╝
 
-INSTALL:  pip install yfinance pandas numpy matplotlib requests openpyxl
+INSTALL:  pip install yfinance pandas numpy matplotlib requests openpyxl pytz
 RUN:      python rsi_mtf_report_v2.py
 OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 """
@@ -43,9 +43,11 @@ LOCAL_FO_CSV        = "india/NSE/nse_fo_list.csv"   # NSE F&O securities list
 
 DATA_PERIOD         = "max"
 MIN_CANDLES         = 1          # include all stocks regardless of history length
-# Always generate a chart for every symbol that completes analysis.
-# Do not allow CI/environment overrides to silently reduce chart coverage.
-MAX_CHART_STOCKS    = 0
+MAX_CHART_STOCKS    = 0         # 0 = generate charts for all stocks; otherwise top N stocks
+# Allow GitHub Actions (or any CI) to cap chart count via env variable
+_chart_override = os.environ.get("MAX_CHART_STOCKS_OVERRIDE", "")
+if _chart_override.isdigit():
+    MAX_CHART_STOCKS = int(_chart_override)
 CHART_OUTPUT_DIR    = "charts"   # folder for generated PNG chart files
 GITHUB_CHARTS_BASE  = "charts"   # "https://raw.githubusercontent.com/dipenshah2006/DailyMomentumStockBreakout/main/charts"
 
@@ -98,6 +100,7 @@ def install_missing_packages():
         'matplotlib': 'matplotlib',
         'requests': 'requests',
         'openpyxl': 'openpyxl',
+        'pytz': 'pytz',
     }
 
     missing = []
@@ -150,8 +153,14 @@ warnings.filterwarnings("ignore")
 CHART_WORKERS = min(12, max(2, (os.cpu_count() or 4)))
 
 IST         = pytz.timezone("Asia/Kolkata")
-RUN_TS      = datetime.now(IST).strftime("%d %b %Y  %H:%M")
-_STAMP      = datetime.now(IST).strftime("%d%m%Y_%H%M")
+
+def _now_ist() -> datetime:
+    """Return the current time explicitly in the NSE market timezone."""
+    return datetime.now(IST)
+
+
+RUN_TS      = _now_ist().strftime("%d %b %Y  %H:%M")
+_STAMP      = _now_ist().strftime("%d%m%Y_%H%M")
 START_TS    = RUN_TS
 START_TIME  = time.time()
 OUTPUT_HTML = "rsi_mtf_report_NSE.html"   # fixed name — always overwrites, no duplicates
@@ -336,11 +345,13 @@ _CACHE_DIRTY  = False       # set True whenever _CACHE is modified
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _today_str() -> str:
-    return _date.today().isoformat()            # "YYYY-MM-DD"
+    # GitHub Actions runners use UTC. NSE sessions and cache freshness must
+    # follow the Indian market date instead of the runner's system date.
+    return _now_ist().date().isoformat()        # "YYYY-MM-DD"
 
 
 def _last_trading_day_str() -> str:
-    today = _date.today()
+    today = _now_ist().date()
     if today.weekday() == 0:      # Monday → last trading day was Friday
         return (today - _td(days=3)).isoformat()
     if today.weekday() == 6:      # Sunday → last trading day was Friday
@@ -632,10 +643,10 @@ def prefetch_all(tickers: list[str]) -> dict[str, int]:
             entry = _CACHE.get(ticker, {})
             last_date = entry.get("last_date")
             if not last_date:
-                start_dt = _date.today() - _td(days=30)
+                start_dt = _now_ist().date() - _td(days=30)
             else:
                 start_dt = _date.fromisoformat(last_date) + _td(days=1)
-            if start_dt >= _date.today():
+            if start_dt >= _now_ist().date():
                 groups.setdefault("SKIP", []).append(ticker)
                 continue
             bucket_key = _bucket_start_date(start_dt)
@@ -646,7 +657,7 @@ def prefetch_all(tickers: list[str]) -> dict[str, int]:
         total_groups = len(group_items)
         for group_index, (bucket_start, group) in enumerate(group_items, start=1):
             start_date = bucket_start
-            end_date = (_date.today() + _td(days=1)).isoformat()
+            end_date = (_now_ist().date() + _td(days=1)).isoformat()
             print(f"  • Bucket {group_index}/{total_groups}: start={start_date} tickers={len(group)}")
 
             for batch_start in range(0, len(group), DL_BATCH_SIZE):
@@ -769,19 +780,6 @@ def calc_rsi(close, period=14):
     loss  = (-delta).clip(lower=0).ewm(com=period - 1, min_periods=period).mean()
     return 100 - (100 / (1 + gain / (loss + 1e-10)))
 
-def rsi_sma_status(rsi, sma):
-    """Classify RSI(14) versus SMA(14) for a timeframe status tag."""
-    try:
-        rsi, sma = float(rsi), float(sma)
-    except (TypeError, ValueError):
-        return "RANGEBOUND"
-    spread = rsi - sma
-    if spread >= 5 and rsi >= 60:
-        return "STRONG UPTREND"
-    if abs(spread) <= 2 or 45 <= rsi <= 55:
-        return "RANGEBOUND"
-    return "BULLISH" if spread > 0 else "BEARISH"
-
 def calc_macd(close, fast=12, slow=26, sig=9):
     line   = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
     signal = line.ewm(span=sig, adjust=False).mean()
@@ -848,20 +846,26 @@ def latest_rsi_crossover(left, right, label):
         elif previous_diff >= 0 and current_diff < 0:
             direction = "BEARISH"
         if direction:
+            event_date = pd.Timestamp(aligned.index[index])
             latest = {
                 "label": label,
                 "direction": direction,
-                "date": pd.Timestamp(aligned.index[index]).strftime("%d %b %Y"),
+                "date": event_date.strftime("%d %b %Y"),
+                "date_key": event_date.strftime("%Y-%m-%d"),
             }
     return latest
 
 
-def rsi_crossover_tags(rsi_d, rsi_w, rsi_m, daily_index, weekly_index):
-    """Find the latest dated crossover for each D/W/M RSI timeframe pair."""
+def rsi_crossover_tags(rsi_d, rsi_w, rsi_m, sma_d, sma_w, sma_m,
+                       daily_index, weekly_index):
+    """Find latest dated RSI/SMA and cross-timeframe RSI crossover events."""
     rsi_w_daily = rsi_w.reindex(daily_index, method="ffill")
     rsi_m_daily = rsi_m.reindex(daily_index, method="ffill")
     rsi_m_weekly = rsi_m.reindex(weekly_index, method="ffill")
     crossovers = [
+        latest_rsi_crossover(rsi_d, sma_d, "Daily RSI / Daily SMA"),
+        latest_rsi_crossover(rsi_w, sma_w, "Weekly RSI / Weekly SMA"),
+        latest_rsi_crossover(rsi_m, sma_m, "Monthly RSI / Monthly SMA"),
         latest_rsi_crossover(rsi_d, rsi_w_daily, "Daily RSI / Weekly RSI"),
         latest_rsi_crossover(rsi_d, rsi_m_daily, "Daily RSI / Monthly RSI"),
         latest_rsi_crossover(rsi_w, rsi_m_weekly, "Weekly RSI / Monthly RSI"),
@@ -1756,7 +1760,7 @@ def analyze_stock(ticker: str) -> dict | None:
 
         hist_sigs = historical_signals(df["Close"], rsi_d, sma_d)
         rsi_crossovers = rsi_crossover_tags(
-            rsi_d, rsi_w, rsi_m, df.index, wk.index
+            rsi_d, rsi_w, rsi_m, sma_d, sma_w, sma_m, df.index, wk.index
         )
 
         if v_rsi_d > 65:
@@ -1868,7 +1872,7 @@ def generate_chart(data: dict) -> str:
         GOLD="#ffd700"; CYAN="#00d4ff"; PURPLE="#b39ddb"; ORANGE="#ff9800"
         GREY="#30363d"; TXT="#c9d1d9"; FIB_EXT="#4caf50"; FIB_RET="#ff7043"
 
-        fig = plt.figure(figsize=(14, 8), facecolor=BG)
+        fig = plt.figure(figsize=(14, 10), facecolor=BG)
         fig.suptitle(
             f"{ticker} — {data['company']}  |  ₹{data['close']:,.2f}  "
             f"|  {data['phase']}  |  {data['signal']}  |  Score {data['score']}/21  "
@@ -1876,7 +1880,7 @@ def generate_chart(data: dict) -> str:
             color=TXT, fontsize=14, fontweight="bold", y=0.998
         )
         gs   = gridspec.GridSpec(5, 1, figure=fig, hspace=0.04,
-                                 height_ratios=[4, 1.2, 1.8, 1.4, 1.4])
+                                 height_ratios=[4.2, 1.2, 2.6, 1.4, 1.4])
         axes = [fig.add_subplot(gs[i]) for i in range(5)]
         for ax in axes:
             ax.set_facecolor(PANEL)
@@ -1948,11 +1952,74 @@ def generate_chart(data: dict) -> str:
         ax3.plot(idx, sma_d, color=ORANGE, lw=1.8, linestyle="--", label=f"SMA({RSI_SMA_P}) {data['sma_d']}", zorder=4)
         ax3.plot(idx, rsi_w, color=PURPLE, lw=1.5, linestyle="-.", label=f"RSI({RSI_P})-W {data['rsi_w']}", alpha=0.8, zorder=3)
         ax3.plot(idx, rsi_m, color=GOLD,   lw=1.5, linestyle=":",  label=f"RSI({RSI_P})-M {data['rsi_m']}", alpha=0.8, zorder=3)
+        # Mark the exact crossover dates used by the report's RSI tags.
+        # Each marker uses the same pair label, direction, and date as the
+        # filter/table tags so the chart and report always agree.
+        chart_dates = pd.DatetimeIndex(pd.to_datetime(df.index))
+        if chart_dates.tz is not None:
+            chart_dates = chart_dates.tz_localize(None)
+        cross_series = {
+            "Daily RSI / Weekly RSI": rsi_d,
+            "Daily RSI / Monthly RSI": rsi_d,
+            "Weekly RSI / Monthly RSI": rsi_w,
+        }
+        cross_short = {
+            "Daily RSI / Weekly RSI": "D/W",
+            "Daily RSI / Monthly RSI": "D/M",
+            "Weekly RSI / Monthly RSI": "W/M",
+        }
+        seen_cross_labels = set()
+        for event in data.get("rsi_crossovers", []):
+            raw_date = event.get("date_key") or event.get("date")
+            try:
+                target_date = pd.Timestamp(pd.to_datetime(raw_date, errors="coerce"))
+                if pd.isna(target_date):
+                    continue
+                if target_date.tzinfo is not None:
+                    target_date = target_date.tz_localize(None)
+                distances = np.array(
+                    [abs((value - target_date).total_seconds()) for value in chart_dates],
+                    dtype=float,
+                )
+                pos = int(np.argmin(distances))
+            except (TypeError, ValueError, IndexError):
+                continue
+            pair = event.get("label", "")
+            series = cross_series.get(pair, rsi_d)
+            y_value = float(series[pos]) if np.isfinite(series[pos]) else 50.0
+            bullish = event.get("direction") == "BULLISH"
+            color = GREEN if bullish else RED
+            marker = "^" if bullish else "v"
+            short = cross_short.get(pair, "RSI")
+            legend_label = f"{'Bullish' if bullish else 'Bearish'} RSI crossover"
+            if legend_label in seen_cross_labels:
+                legend_label = "_nolegend_"
+            else:
+                seen_cross_labels.add(legend_label)
+            ax3.axvline(pos, color=color, lw=1.0, linestyle="--", alpha=0.35, zorder=2)
+            ax3.scatter(
+                [pos], [y_value], color=color, marker=marker, s=75,
+                edgecolors="white", linewidths=1.0, zorder=7, label=legend_label,
+            )
+            ax3.annotate(
+                f"{short} {'▲' if bullish else '▼'}\n{event.get('date', '')}",
+                xy=(pos, y_value),
+                xytext=(0, 16 if bullish else -26),
+                textcoords="offset points",
+                ha="center",
+                va="bottom" if bullish else "top",
+                color=color,
+                fontsize=7.5,
+                fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor=PANEL, edgecolor=color, linewidth=0.7),
+                arrowprops=dict(arrowstyle="-", color=color, lw=0.7),
+                zorder=8,
+            )
         if data["fresh_d"] and data["fresh_d_bars"] <= n_bars:
             cx = len(idx) - data["fresh_d_bars"]
             ax3.axvline(cx, color=GREEN, lw=2.0, linestyle="--", alpha=0.8, label="Fresh Cross")
             ax3.text(cx, 74, "FRESH", color=GREEN, fontsize=9, ha="center", fontweight="bold", bbox=dict(boxstyle="round,pad=0.4", facecolor=PANEL, edgecolor=GREEN, linewidth=1.5))
-        ax3.set_ylim(10, 90); ax3.set_ylabel("RSI", color=TXT, fontsize=10, fontweight="bold")
+        ax3.set_ylim(10, 90); ax3.set_ylabel("RSI / Crossover", color=TXT, fontsize=10, fontweight="bold")
         ax3.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, ncol=2, framealpha=0.95)
 
         # Panel 4: MACD
@@ -1980,12 +2047,10 @@ def generate_chart(data: dict) -> str:
         ax5.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
 
         plt.tight_layout(rect=[0, 0, 1, 0.996])
-        updated_at = datetime.now().strftime("%d %b %Y %H:%M")
+        updated_at = _now_ist().strftime("%d %b %Y %H:%M")
         fig.text(0.995, 0.005, f"Updated: {updated_at}", ha="right", va="bottom", color=TXT, fontsize=9, style="italic")
         os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
-        # Use the per-run content-hashed path when available.  A stable filename
-        # allows GitHub Pages/CDNs to serve an older PNG indefinitely.
-        chart_path = data.get("_chart_path") or os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
+        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
         fig.savefig(chart_path, format="png", dpi=CHART_DPI, bbox_inches="tight", facecolor=BG)
         plt.close(fig)
         return chart_path.replace("\\", "/")
@@ -2144,13 +2209,6 @@ a{color:var(--cyan)}
                 font-size:10px;font-weight:700;border:1px solid;margin:1px 2px}
 .rsi-cross-bull{background:#0d3320;color:var(--green);border-color:#26d07c55}
 .rsi-cross-bear{background:#2d0a0a;color:var(--red);border-color:#ff4d6d55}
-.rsi-status-tag{display:inline-block;border-radius:8px;padding:1px 6px;
-                 font-size:9px;font-weight:700;border:1px solid;margin:1px 2px;
-                 white-space:nowrap}
-.rsi-status-strong{background:#063d28;color:#00e676;border-color:#00e67666}
-.rsi-status-bull{background:#0d3320;color:var(--green);border-color:#26d07c55}
-.rsi-status-bear{background:#2d0a0a;color:var(--red);border-color:#ff4d6d55}
-.rsi-status-range{background:#2d2600;color:var(--gold);border-color:#ffd70055}
 .n50-tag{background:#1a0d30;color:var(--purple);border-radius:8px;padding:1px 7px;
          font-size:10px;font-weight:700;border:1px solid #b39ddb44}
 .sme-tag{background:#1a2d0d;color:#4caf50;border-radius:8px;padding:1px 7px;
@@ -2387,27 +2445,6 @@ function rsiCrossoverTags(s){
   }).join(' ');
 }
 
-function rsiStatusTag(tf,rsi,sma){
-  const spread=Number(rsi)-Number(sma);
-  let status, cls, icon;
-  if(spread>=5 && Number(rsi)>=60){
-    status='STRONG UPTREND'; cls='rsi-status-strong'; icon='🚀';
-  }else if(Math.abs(spread)<=2 || (Number(rsi)>=45 && Number(rsi)<=55)){
-    status='RANGEBOUND'; cls='rsi-status-range'; icon='↔';
-  }else if(spread>0){
-    status='BULLISH'; cls='rsi-status-bull'; icon='▲';
-  }else{
-    status='BEARISH'; cls='rsi-status-bear'; icon='▼';
-  }
-  return `<span class="rsi-status-tag ${cls}" title="${tf} RSI(14) ${rsi} vs SMA(14) ${sma}">${icon} ${tf[0]} ${status}</span>`;
-}
-
-function rsiTimeframeTags(s){
-  return rsiStatusTag('Daily',s.rsi_d,s.sma_d)+
-    rsiStatusTag('Weekly',s.rsi_w,s.sma_w)+
-    rsiStatusTag('Monthly',s.rsi_m,s.sma_m);
-}
-
 const CROSS_LABELS={
   'any-bullish':'Any bullish crossover',
   'any-bearish':'Any bearish crossover',
@@ -2537,10 +2574,8 @@ function rowHTML(s){
     :'<div style="font-size:10px;color:var(--sub)">—</div>';
   const _athTag = athTag(s);
   const _rsiCrossTags = rsiCrossoverTags(s);
-  const _rsiStatusTags = rsiTimeframeTags(s);
   return `<tr class="sum-row">
   <td><b style="color:var(--cyan)">${esc(s.ticker)}</b> ${frTag}${n50Tag}${smeTag}
-      <div style="margin-top:2px">${_rsiStatusTags}</div>
       <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div>
       <div style="font-size:10px;color:var(--gold);font-weight:600">${fmtINR(s.close)}</div>
       ${foTag?`<span style="margin-left:2px">${foTag}</span>`:''}
@@ -2645,12 +2680,10 @@ function cardSummaryHTML(s,idx){
   const secTag=_cSecList.map(l=>`<span class="sector-tag">${esc(l)}</span>`).join(' ');
   const _ath=athTag(s);
   const _rsiCrossTags=rsiCrossoverTags(s);
-  const _rsiStatusTags=rsiTimeframeTags(s);
   return `<details class="stock-card" data-idx="${idx}">
   <summary>
     <span class="card-arrow">▶</span>
     <span class="card-ticker">${esc(s.ticker)}</span>
-    ${_rsiStatusTags}
     <span class="card-price">${fmtINR(s.close)}</span>
     ${phaseBadge(s.phase)}
     <span class="${s.sig_cls}" style="font-weight:700">${esc(s.signal)}</span>
@@ -2984,21 +3017,13 @@ def _build_detail_panels(d: dict) -> str:
 
     # RSI table
     def rsi_row(tf, rv, sv, is_fresh_tf):
-        status = rsi_sma_status(rv, sv)
-        status_cls = {
-            "STRONG UPTREND": "rsi-status-strong",
-            "BULLISH": "rsi-status-bull",
-            "BEARISH": "rsi-status-bear",
-            "RANGEBOUND": "rsi-status-range",
-        }[status]
-        icon = {"STRONG UPTREND": "🚀", "BULLISH": "▲",
-                "BEARISH": "▼", "RANGEBOUND": "↔"}[status]
-        cls = "g" if status in ("STRONG UPTREND", "BULLISH") else "r" if status == "BEARISH" else ""
+        cls = "g" if rv > sv else "r"
+        arr = "▲" if rv > sv else "▼"
         fr  = ' <span class="fresh-tag">FRESH</span>' if is_fresh_tf else ""
         return (f'<tr><td>{tf}</td>'
                 f'<td class="{cls}"><b>{rv}</b></td>'
                 f'<td style="font-size:10px;color:var(--sub)">{sv}</td>'
-                f'<td><span class="rsi-status-tag {status_cls}">{icon} {status}</span>{fr}</td></tr>')
+                f'<td class="{cls}">{arr}{"ABOVE" if rv>sv else "BELOW"}{fr}</td></tr>')
 
     def cci_row(tf, v):
         cls = "g" if v > 0 else "r"
@@ -3518,7 +3543,7 @@ _HTML_FIELDS = {
     'sell_conds','score','phase','signal','sig_cls','fresh_d','fresh_d_bars','fresh_w',
     'fresh_w_bars','donchian_d','donchian_w','donchian_m','is_nifty50','is_sme','is_fo','sector','sectors','indices','marketcap','cap_cat','cap_cls',
     'rank_nifty50','rank_nifty50_pos','rank_nifty50_of','rank_universe','rank_univ_pos',
-    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','rsi_crossovers','has_chart','chart_url',
+    'rank_univ_of','fib_type','fib_levels','fib_base','sig_list','hist_sigs','rsi_crossovers','has_chart',
     'ath_price','ath_date','ath_pct','is_ath','ath_time_str',
     'explosive_score','explosive_signals','vol_ratio',
     'bb_upper','bb_mid','bb_lower','bb_pct','bb_slope',
@@ -3530,7 +3555,8 @@ def _html_safe_stock(d: dict) -> dict:
     rec = {k: d[k] for k in _HTML_FIELDS if k in d}
     # Keep chart file reference (don't embed base64 — charts loaded on demand from file)
     if d.get('has_chart'):
-        rec['chart_path'] = d.get('chart_url') or f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
+        chart_path = f"{GITHUB_CHARTS_BASE}/{d['ticker']}.png"
+        rec['chart_path'] = chart_path
     return rec
 
 
@@ -3570,9 +3596,6 @@ def build_html_report(all_results: list[dict], chart_data: dict[str, str],
         d["cap_cat"]   = cap_cat
         d["cap_cls"]   = cap_cls
         d["has_chart"] = d["ticker"] in chart_tickers
-        if d["has_chart"]:
-            chart_file = os.path.basename(chart_data[d["ticker"]])
-            d["chart_url"] = f"{GITHUB_CHARTS_BASE}/{chart_file}"
 
     # ── Serialize to compact JSON (only the fields needed by HTML/JS) ───────
     safe_results = [_html_safe_stock(d) for d in all_results]
@@ -3775,7 +3798,7 @@ def main(force_charts: bool = False):
         pct  = i / total * 100
         fill = int(pct / 2)
         elapsed = time.time() - t0
-        current_time = datetime.now().strftime("%H:%M:%S")
+        current_time = _now_ist().strftime("%H:%M:%S")
         sys.stdout.write(
             f"\r  [{'█'*fill}{'░'*(50-fill)}] {pct:5.1f}%  {i:>4}/{total}  "
             f"{ticker:<14}  ok={len(results)}  err={errors}  "
@@ -3822,18 +3845,29 @@ def main(force_charts: bool = False):
     os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
     print(f"   Generating charts for {'all' if MAX_CHART_STOCKS <= 0 else 'top'} {len(chart_tickers)} stocks...")
 
+    meta = _load_chart_cache_meta()
     stale = []
+    cached = 0
     for d in chart_candidates:
         ticker = d["ticker"]
+        chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png").replace("\\", "/")
         chart_hash = _compute_chart_hash(d)
-        # The content hash makes every changed chart a new URL, permanently
-        # avoiding browser/CDN cache collisions between report runs.
-        chart_name = f"{ticker}_{chart_hash[:16] or 'latest'}.png"
-        chart_path = os.path.join(CHART_OUTPUT_DIR, chart_name).replace("\\", "/")
-        d["_chart_path"] = chart_path
+        # Existing chart images are valid report assets even when the metadata
+        # hash is stale (for example after a cache refresh or code update).
+        # Reusing them keeps a full NSE scan from spending another long run
+        # regenerating thousands of PNGs before the HTML can be published.
+        if not force_charts and os.path.exists(chart_path):
+            chart_data[ticker] = chart_path
+            cached += 1
+            if chart_hash and meta.get(ticker, {}).get("hash") != chart_hash:
+                meta[ticker] = {
+                    "hash": chart_hash,
+                    "updated_at": _now_ist().strftime("%d %b %Y %H:%M"),
+                }
+            continue
         stale.append((d, chart_hash, chart_path))
 
-    print(f"   Chart cache disabled — regenerating {len(stale)}/{len(chart_tickers)} charts")
+    print(f"   Reusing {cached}/{len(chart_tickers)} cached charts")
 
     if stale:
         workers = min(CHART_WORKERS, len(stale))
@@ -3851,14 +3885,17 @@ def main(force_charts: bool = False):
                     log_error(ticker, get_company_name(ticker), "CHART-PARALLEL", exc)
                 if generated_path:
                     chart_data[ticker] = generated_path
-                    d["_chart_path"] = generated_path
+                    meta[ticker] = {"hash": chart_hash, "updated_at": _now_ist().strftime("%d %b %Y %H:%M")}
+                elif os.path.exists(chart_path):
+                    chart_data[ticker] = chart_path
                 else:
                     print(f"\n   ⚠️ Chart failed for {ticker} — see {ERROR_LOG}")
                 sys.stdout.write(f"\r   Charts completed: {completed}/{len(stale)}")
                 sys.stdout.flush()
         print()
+        _save_chart_cache_meta(meta)
     else:
-        print("   No charts selected.")
+        print("   No charts to generate.")
 
     print(f"   {len(chart_data)}/{len(chart_tickers)} charts generated")
 

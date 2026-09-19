@@ -36,6 +36,11 @@ concurrency:
   # A stale long-running scan must not block a corrected manual run.
   cancel-in-progress: true
 
+# NSE reports, cache freshness, shell dates, and email subjects should all use
+# the Indian market timezone rather than the GitHub runner's default UTC.
+env:
+  TZ: Asia/Kolkata
+
 # ── Each report runs in its own parallel job — a failure or timeout
 # ── in one does NOT affect the others. The deploy job always runs
 # ── at the end to publish whatever succeeded.
@@ -63,7 +68,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas numpy matplotlib requests openpyxl
+          pip install yfinance pandas numpy matplotlib requests openpyxl pytz
 
       - name: Restore data cache
         uses: actions/cache@v4
