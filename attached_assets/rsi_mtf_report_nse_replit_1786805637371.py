@@ -10,7 +10,7 @@
 ║    • Native <details> expand/collapse — no JS needed, instant               ║
 ╚═════════════════════════════════════════════════════════════════════════════╝
 
-INSTALL:  pip install yfinance pandas numpy matplotlib requests openpyxl pytz
+INSTALL:  pip install yfinance pandas numpy matplotlib requests openpyxl
 RUN:      python rsi_mtf_report_v2.py
 OUTPUTS:  rsi_mtf_report_YYYYMMDD_HHMM.html  +  error_log_YYYYMMDD_HHMM.txt
 """
@@ -100,7 +100,6 @@ def install_missing_packages():
         'matplotlib': 'matplotlib',
         'requests': 'requests',
         'openpyxl': 'openpyxl',
-        'pytz': 'pytz',
     }
 
     missing = []
@@ -153,14 +152,8 @@ warnings.filterwarnings("ignore")
 CHART_WORKERS = min(12, max(2, (os.cpu_count() or 4)))
 
 IST         = pytz.timezone("Asia/Kolkata")
-
-def _now_ist() -> datetime:
-    """Return the current time explicitly in the NSE market timezone."""
-    return datetime.now(IST)
-
-
-RUN_TS      = _now_ist().strftime("%d %b %Y  %H:%M")
-_STAMP      = _now_ist().strftime("%d%m%Y_%H%M")
+RUN_TS      = datetime.now(IST).strftime("%d %b %Y  %H:%M")
+_STAMP      = datetime.now(IST).strftime("%d%m%Y_%H%M")
 START_TS    = RUN_TS
 START_TIME  = time.time()
 OUTPUT_HTML = "rsi_mtf_report_NSE.html"   # fixed name — always overwrites, no duplicates
@@ -345,49 +338,24 @@ _CACHE_DIRTY  = False       # set True whenever _CACHE is modified
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _today_str() -> str:
-    # GitHub Actions runners use UTC. NSE sessions and cache freshness must
-    # follow the Indian market date instead of the runner's system date.
-    return _now_ist().date().isoformat()        # "YYYY-MM-DD"
+    return _date.today().isoformat()            # "YYYY-MM-DD"
 
 
-def _as_ist(value: datetime | None = None) -> datetime:
-    """Normalize a timestamp to the NSE timezone for date/session decisions."""
-    value = _now_ist() if value is None else value
-    if value.tzinfo is None:
-        return IST.localize(value)
-    return value.astimezone(IST)
+def _last_trading_day_str() -> str:
+    today = _date.today()
+    if today.weekday() == 0:      # Monday → last trading day was Friday
+        return (today - _td(days=3)).isoformat()
+    if today.weekday() == 6:      # Sunday → last trading day was Friday
+        return (today - _td(days=2)).isoformat()
+    if today.weekday() == 5:      # Saturday → last trading day was Friday
+        return (today - _td(days=1)).isoformat()
+    return (today - _td(days=1)).isoformat()
 
 
-def _latest_completed_nse_date(now: datetime | None = None) -> _date:
-    """Return the date of the latest completed weekday NSE session.
-
-    The report runs after the cash market closes on scheduled workflow runs,
-    so the current weekday is complete after 15:30 IST. Before then, and on
-    weekends, the latest completed session is the preceding weekday.
-    """
-    local_now = _as_ist(now)
-    session_date = local_now.date()
-    after_close = (
-        session_date.weekday() < 5
-        and (local_now.hour, local_now.minute, local_now.second) >= (15, 30, 0)
-    )
-    if not after_close:
-        session_date -= _td(days=1)
-    while session_date.weekday() >= 5:
-        session_date -= _td(days=1)
-    return session_date
-
-
-def _last_trading_day_str(now: datetime | None = None) -> str:
-    """Return the latest completed NSE session as an ISO date string."""
-    return _latest_completed_nse_date(now).isoformat()
-
-
-def _is_fresh(entry: dict, expected_session: str | None = None) -> bool:
+def _is_fresh(entry: dict) -> bool:
     """True if cached data already has the most recent likely market bar."""
     last = entry.get("last_date", "")
-    expected_session = expected_session or _last_trading_day_str()
-    return last >= expected_session
+    return last >= _last_trading_day_str()
 
 # ── Load / save ────────────────────────────────────────────────────────────
 
@@ -631,9 +599,7 @@ def prefetch_all(tickers: list[str]) -> dict[str, int]:
     """
     global _CACHE_DIRTY
 
-    now_ist = _now_ist()
-    today = now_ist.date()
-    latest_session = _latest_completed_nse_date(now_ist)
+    today = _today_str()
 
     fresh_tickers   = []   # cache data already has last trading day → skip
     stale_tickers   = []   # in cache but older than last trading day
@@ -642,7 +608,7 @@ def prefetch_all(tickers: list[str]) -> dict[str, int]:
     for t in tickers:
         entry = _CACHE.get(t)
         if isinstance(entry, dict) and isinstance(entry.get("df"), pd.DataFrame):
-            if _is_fresh(entry, latest_session.isoformat()):
+            if _is_fresh(entry):
                 fresh_tickers.append(t)
             else:
                 stale_tickers.append(t)
@@ -668,13 +634,10 @@ def prefetch_all(tickers: list[str]) -> dict[str, int]:
             entry = _CACHE.get(ticker, {})
             last_date = entry.get("last_date")
             if not last_date:
-                start_dt = today - _td(days=30)
+                start_dt = _date.today() - _td(days=30)
             else:
                 start_dt = _date.fromisoformat(last_date) + _td(days=1)
-            # If today's session is complete, start today so the missing close
-            # is fetched. Only skip a future range, or today's range before
-            # the session has completed.
-            if start_dt > today or (start_dt == today and latest_session < today):
+            if start_dt >= _date.today():
                 groups.setdefault("SKIP", []).append(ticker)
                 continue
             bucket_key = _bucket_start_date(start_dt)
@@ -685,7 +648,7 @@ def prefetch_all(tickers: list[str]) -> dict[str, int]:
         total_groups = len(group_items)
         for group_index, (bucket_start, group) in enumerate(group_items, start=1):
             start_date = bucket_start
-            end_date = (today + _td(days=1)).isoformat()
+            end_date = (_date.today() + _td(days=1)).isoformat()
             print(f"  • Bucket {group_index}/{total_groups}: start={start_date} tickers={len(group)}")
 
             for batch_start in range(0, len(group), DL_BATCH_SIZE):
@@ -874,26 +837,20 @@ def latest_rsi_crossover(left, right, label):
         elif previous_diff >= 0 and current_diff < 0:
             direction = "BEARISH"
         if direction:
-            event_date = pd.Timestamp(aligned.index[index])
             latest = {
                 "label": label,
                 "direction": direction,
-                "date": event_date.strftime("%d %b %Y"),
-                "date_key": event_date.strftime("%Y-%m-%d"),
+                "date": pd.Timestamp(aligned.index[index]).strftime("%d %b %Y"),
             }
     return latest
 
 
-def rsi_crossover_tags(rsi_d, rsi_w, rsi_m, sma_d, sma_w, sma_m,
-                       daily_index, weekly_index):
-    """Find latest dated RSI/SMA and cross-timeframe RSI crossover events."""
+def rsi_crossover_tags(rsi_d, rsi_w, rsi_m, daily_index, weekly_index):
+    """Find the latest dated crossover for each D/W/M RSI timeframe pair."""
     rsi_w_daily = rsi_w.reindex(daily_index, method="ffill")
     rsi_m_daily = rsi_m.reindex(daily_index, method="ffill")
     rsi_m_weekly = rsi_m.reindex(weekly_index, method="ffill")
     crossovers = [
-        latest_rsi_crossover(rsi_d, sma_d, "Daily RSI / Daily SMA"),
-        latest_rsi_crossover(rsi_w, sma_w, "Weekly RSI / Weekly SMA"),
-        latest_rsi_crossover(rsi_m, sma_m, "Monthly RSI / Monthly SMA"),
         latest_rsi_crossover(rsi_d, rsi_w_daily, "Daily RSI / Weekly RSI"),
         latest_rsi_crossover(rsi_d, rsi_m_daily, "Daily RSI / Monthly RSI"),
         latest_rsi_crossover(rsi_w, rsi_m_weekly, "Weekly RSI / Monthly RSI"),
@@ -1788,7 +1745,7 @@ def analyze_stock(ticker: str) -> dict | None:
 
         hist_sigs = historical_signals(df["Close"], rsi_d, sma_d)
         rsi_crossovers = rsi_crossover_tags(
-            rsi_d, rsi_w, rsi_m, sma_d, sma_w, sma_m, df.index, wk.index
+            rsi_d, rsi_w, rsi_m, df.index, wk.index
         )
 
         if v_rsi_d > 65:
@@ -1900,7 +1857,7 @@ def generate_chart(data: dict) -> str:
         GOLD="#ffd700"; CYAN="#00d4ff"; PURPLE="#b39ddb"; ORANGE="#ff9800"
         GREY="#30363d"; TXT="#c9d1d9"; FIB_EXT="#4caf50"; FIB_RET="#ff7043"
 
-        fig = plt.figure(figsize=(14, 10), facecolor=BG)
+        fig = plt.figure(figsize=(14, 8), facecolor=BG)
         fig.suptitle(
             f"{ticker} — {data['company']}  |  ₹{data['close']:,.2f}  "
             f"|  {data['phase']}  |  {data['signal']}  |  Score {data['score']}/21  "
@@ -1908,7 +1865,7 @@ def generate_chart(data: dict) -> str:
             color=TXT, fontsize=14, fontweight="bold", y=0.998
         )
         gs   = gridspec.GridSpec(5, 1, figure=fig, hspace=0.04,
-                                 height_ratios=[4.2, 1.2, 2.6, 1.4, 1.4])
+                                 height_ratios=[4, 1.2, 1.8, 1.4, 1.4])
         axes = [fig.add_subplot(gs[i]) for i in range(5)]
         for ax in axes:
             ax.set_facecolor(PANEL)
@@ -1980,74 +1937,11 @@ def generate_chart(data: dict) -> str:
         ax3.plot(idx, sma_d, color=ORANGE, lw=1.8, linestyle="--", label=f"SMA({RSI_SMA_P}) {data['sma_d']}", zorder=4)
         ax3.plot(idx, rsi_w, color=PURPLE, lw=1.5, linestyle="-.", label=f"RSI({RSI_P})-W {data['rsi_w']}", alpha=0.8, zorder=3)
         ax3.plot(idx, rsi_m, color=GOLD,   lw=1.5, linestyle=":",  label=f"RSI({RSI_P})-M {data['rsi_m']}", alpha=0.8, zorder=3)
-        # Mark the exact crossover dates used by the report's RSI tags.
-        # Each marker uses the same pair label, direction, and date as the
-        # filter/table tags so the chart and report always agree.
-        chart_dates = pd.DatetimeIndex(pd.to_datetime(df.index))
-        if chart_dates.tz is not None:
-            chart_dates = chart_dates.tz_localize(None)
-        cross_series = {
-            "Daily RSI / Weekly RSI": rsi_d,
-            "Daily RSI / Monthly RSI": rsi_d,
-            "Weekly RSI / Monthly RSI": rsi_w,
-        }
-        cross_short = {
-            "Daily RSI / Weekly RSI": "D/W",
-            "Daily RSI / Monthly RSI": "D/M",
-            "Weekly RSI / Monthly RSI": "W/M",
-        }
-        seen_cross_labels = set()
-        for event in data.get("rsi_crossovers", []):
-            raw_date = event.get("date_key") or event.get("date")
-            try:
-                target_date = pd.Timestamp(pd.to_datetime(raw_date, errors="coerce"))
-                if pd.isna(target_date):
-                    continue
-                if target_date.tzinfo is not None:
-                    target_date = target_date.tz_localize(None)
-                distances = np.array(
-                    [abs((value - target_date).total_seconds()) for value in chart_dates],
-                    dtype=float,
-                )
-                pos = int(np.argmin(distances))
-            except (TypeError, ValueError, IndexError):
-                continue
-            pair = event.get("label", "")
-            series = cross_series.get(pair, rsi_d)
-            y_value = float(series[pos]) if np.isfinite(series[pos]) else 50.0
-            bullish = event.get("direction") == "BULLISH"
-            color = GREEN if bullish else RED
-            marker = "^" if bullish else "v"
-            short = cross_short.get(pair, "RSI")
-            legend_label = f"{'Bullish' if bullish else 'Bearish'} RSI crossover"
-            if legend_label in seen_cross_labels:
-                legend_label = "_nolegend_"
-            else:
-                seen_cross_labels.add(legend_label)
-            ax3.axvline(pos, color=color, lw=1.0, linestyle="--", alpha=0.35, zorder=2)
-            ax3.scatter(
-                [pos], [y_value], color=color, marker=marker, s=75,
-                edgecolors="white", linewidths=1.0, zorder=7, label=legend_label,
-            )
-            ax3.annotate(
-                f"{short} {'▲' if bullish else '▼'}\n{event.get('date', '')}",
-                xy=(pos, y_value),
-                xytext=(0, 16 if bullish else -26),
-                textcoords="offset points",
-                ha="center",
-                va="bottom" if bullish else "top",
-                color=color,
-                fontsize=7.5,
-                fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor=PANEL, edgecolor=color, linewidth=0.7),
-                arrowprops=dict(arrowstyle="-", color=color, lw=0.7),
-                zorder=8,
-            )
         if data["fresh_d"] and data["fresh_d_bars"] <= n_bars:
             cx = len(idx) - data["fresh_d_bars"]
             ax3.axvline(cx, color=GREEN, lw=2.0, linestyle="--", alpha=0.8, label="Fresh Cross")
             ax3.text(cx, 74, "FRESH", color=GREEN, fontsize=9, ha="center", fontweight="bold", bbox=dict(boxstyle="round,pad=0.4", facecolor=PANEL, edgecolor=GREEN, linewidth=1.5))
-        ax3.set_ylim(10, 90); ax3.set_ylabel("RSI / Crossover", color=TXT, fontsize=10, fontweight="bold")
+        ax3.set_ylim(10, 90); ax3.set_ylabel("RSI", color=TXT, fontsize=10, fontweight="bold")
         ax3.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, ncol=2, framealpha=0.95)
 
         # Panel 4: MACD
@@ -2075,7 +1969,7 @@ def generate_chart(data: dict) -> str:
         ax5.legend(loc="upper left", facecolor=BG, edgecolor=GREY, labelcolor=TXT, fontsize=8, framealpha=0.95)
 
         plt.tight_layout(rect=[0, 0, 1, 0.996])
-        updated_at = _now_ist().strftime("%d %b %Y %H:%M")
+        updated_at = datetime.now().strftime("%d %b %Y %H:%M")
         fig.text(0.995, 0.005, f"Updated: {updated_at}", ha="right", va="bottom", color=TXT, fontsize=9, style="italic")
         os.makedirs(CHART_OUTPUT_DIR, exist_ok=True)
         chart_path = os.path.join(CHART_OUTPUT_DIR, f"{ticker}.png")
@@ -3826,7 +3720,7 @@ def main(force_charts: bool = False):
         pct  = i / total * 100
         fill = int(pct / 2)
         elapsed = time.time() - t0
-        current_time = _now_ist().strftime("%H:%M:%S")
+        current_time = datetime.now().strftime("%H:%M:%S")
         sys.stdout.write(
             f"\r  [{'█'*fill}{'░'*(50-fill)}] {pct:5.1f}%  {i:>4}/{total}  "
             f"{ticker:<14}  ok={len(results)}  err={errors}  "
@@ -3890,7 +3784,7 @@ def main(force_charts: bool = False):
             if chart_hash and meta.get(ticker, {}).get("hash") != chart_hash:
                 meta[ticker] = {
                     "hash": chart_hash,
-                    "updated_at": _now_ist().strftime("%d %b %Y %H:%M"),
+                    "updated_at": datetime.now().strftime("%d %b %Y %H:%M"),
                 }
             continue
         stale.append((d, chart_hash, chart_path))
@@ -3913,7 +3807,7 @@ def main(force_charts: bool = False):
                     log_error(ticker, get_company_name(ticker), "CHART-PARALLEL", exc)
                 if generated_path:
                     chart_data[ticker] = generated_path
-                    meta[ticker] = {"hash": chart_hash, "updated_at": _now_ist().strftime("%d %b %Y %H:%M")}
+                    meta[ticker] = {"hash": chart_hash, "updated_at": datetime.now().strftime("%d %b %Y %H:%M")}
                 elif os.path.exists(chart_path):
                     chart_data[ticker] = chart_path
                 else:

@@ -70,6 +70,9 @@ jobs:
           pip install --upgrade pip
           pip install yfinance pandas numpy matplotlib requests openpyxl pytz
 
+      - name: Check NSE market-date and cache freshness logic
+        run: python -m unittest tests/test_nse_market_dates.py
+
       - name: Restore data cache
         uses: actions/cache@v4
         with:

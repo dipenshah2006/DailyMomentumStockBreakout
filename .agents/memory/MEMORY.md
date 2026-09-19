@@ -2,3 +2,4 @@
 - [ASX CI validation](asx-ci-validation.md) — per-ticker exceptions can produce a green process but empty report; smoke-test a real .AX symbol through analyze_stock()
 - [MonthlyTrend CI](monthlytrend-ci.md) — PyArrow is required for the per-symbol parquet cache to persist between daily runs
 - [Python post-merge setup](python-post-merge.md) — Nix’s externally managed Python requires non-interactive pip installs to use the supported override
+- [GitHub Actions rerun safety](github-actions-rerun-safety.md) — generated files need autostash before rebase; Pages artifacts need unique run/attempt names
