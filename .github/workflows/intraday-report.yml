@@ -15,7 +15,7 @@ on:
           - 'true'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   TZ: Asia/Kolkata
@@ -83,7 +83,20 @@ jobs:
           path: intraday_report_NSE.html
           retention-days: 3
 
-      # ── 7. Send Intraday email ───────────────────────────────────────────────
+      # Persist the latest successful report so the Pages deployment workflow
+      # can publish it as intraday.html on its next run.
+      - name: Commit latest intraday report
+        if: steps.intraday_scan.outcome == 'success'
+        run: |
+          git config user.name "NSE Bot"
+          git config user.email "bot@noreply"
+          git pull --rebase --autostash origin main
+          git add intraday_report_NSE.html
+          git diff --cached --quiet \
+            && echo "No changes in intraday_report_NSE.html — skipping commit" \
+            || (git commit -m "chore: update intraday_report_NSE.html [skip ci]" && git push)
+
+      # ── 8. Send Intraday email ───────────────────────────────────────────────
       - name: Send Intraday Breakout email
         if: steps.intraday_scan.outcome == 'success'
         env:

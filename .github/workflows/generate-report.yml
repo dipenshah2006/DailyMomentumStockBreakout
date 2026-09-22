@@ -953,6 +953,8 @@ jobs:
 
           # Multibagger HTML is committed to the repo by multibagger-report.yml
           [ -f "multibagger_report.html" ] && cp multibagger_report.html _site/multibagger.html    && echo "✅ Multibagger (from repo)" || echo "⚠️  Multibagger not in repo yet"
+          # Intraday HTML is committed to the repo by intraday-report.yml.
+          [ -f "intraday_report_NSE.html" ] && cp intraday_report_NSE.html _site/intraday.html && echo "✅ Intraday (from repo)" || echo "⚠️  Intraday not in repo yet"
 
           # Charts — copy from repo checkout (committed PNGs) merged with
           # any fresh PNGs downloaded from the rsi-charts artifact above.
