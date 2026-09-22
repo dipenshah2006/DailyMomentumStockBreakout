@@ -2247,6 +2247,20 @@ a{color:var(--cyan)}
 .sum-table td:first-child b{white-space:nowrap}
 .ticker-company{font-size:10px;color:var(--sub);white-space:normal;
                 overflow-wrap:anywhere;line-height:1.2}
+/* Runtime badges share the ticker/company cell. Keep every badge inside the
+   user-selected column width so long sector/index names wrap cleanly. */
+.sum-table td:first-child .fresh-tag,
+.sum-table td:first-child .n50-tag,
+.sum-table td:first-child .sme-tag,
+.sum-table td:first-child .fo-tag,
+.sum-table td:first-child .index-tag,
+.sum-table td:first-child .sector-tag,
+.sum-table td:first-child .rsi-cross-tag,
+.sum-table td:first-child .ath-tag,
+.sum-table td:first-child .ath-away-tag{
+  display:inline-block;max-width:100%;white-space:normal;
+  overflow-wrap:anywhere;word-break:break-word;vertical-align:top;
+  box-sizing:border-box;line-height:1.25}
 .sum-table .col-resizer{position:absolute;right:0;top:0;width:7px;height:100%;
                         cursor:col-resize;z-index:20}
 .sum-table .col-resizer:hover,.sum-table .col-resizer.active{
