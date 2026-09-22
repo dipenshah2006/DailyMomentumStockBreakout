@@ -2206,13 +2206,51 @@ a{color:var(--cyan)}
 .table-wrap::-webkit-scrollbar{height:10px}
 .table-wrap::-webkit-scrollbar-track{background:var(--card)}
 .table-wrap::-webkit-scrollbar-thumb{background:var(--cyan);border-radius:10px}
-.sum-table{min-width:1380px;border-collapse:collapse;font-size:11.5px}
+.table-layout-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+                    padding:7px 0 8px;color:var(--sub);font-size:11px}
+.layout-tool{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.layout-tool input[type=range]{width:100px;accent-color:var(--cyan);cursor:pointer}
+.layout-value{display:inline-block;min-width:38px;color:var(--cyan);font-variant-numeric:tabular-nums}
+.layout-reset{background:transparent;border:1px solid var(--border);color:var(--sub);
+              border-radius:12px;padding:3px 9px;cursor:pointer;font-size:10px}
+.layout-reset:hover{border-color:var(--cyan);color:var(--cyan)}
+.layout-help{font-size:10px;color:#6e7681}
+.sum-table{width:max-content;min-width:1700px;border-collapse:collapse;
+           table-layout:fixed;font-size:11.5px}
+.sum-table col[data-col-key="ticker"]{width:var(--ticker-col-width,190px)}
+.sum-table col[data-col-key="phase"]{width:115px}
+.sum-table col[data-col-key="signal"]{width:135px}
+.sum-table col[data-col-key="score"]{width:70px}
+.sum-table col[data-col-key="rsid"],
+.sum-table col[data-col-key="rsiw"],
+.sum-table col[data-col-key="rsim"]{width:78px}
+.sum-table col[data-col-key="cci"]{width:70px}
+.sum-table col[data-col-key="macd"]{width:82px}
+.sum-table col[data-col-key="close"]{width:88px}
+.sum-table col[data-col-key="dist52"]{width:78px}
+.sum-table col[data-col-key="mcap"]{width:120px}
+.sum-table col[data-col-key="donchd"],
+.sum-table col[data-col-key="donchw"],
+.sum-table col[data-col-key="donchm"]{width:82px}
+.sum-table col[data-col-key="rn50"],
+.sum-table col[data-col-key="runiv"]{width:155px}
 .sum-table th{background:#21262d;color:var(--sub);padding:7px 9px;text-align:left;
-              font-weight:600;white-space:nowrap;position:sticky;top:0;z-index:5}
+               font-weight:600;white-space:nowrap;position:sticky;top:0;z-index:5;
+               height:var(--table-row-height,42px);vertical-align:middle}
 .sum-table th[data-col]{cursor:pointer;user-select:none}
 .sum-table th[data-col]:hover{color:var(--cyan)}
 .sort-ind{display:inline-block;min-width:12px;font-size:10px;margin-left:2px;opacity:.7}
-.sum-table td{padding:6px 9px;border-bottom:1px solid #21262d;white-space:nowrap}
+.sum-table td{height:var(--table-row-height,42px);padding:6px 9px;
+              border-bottom:1px solid #21262d;white-space:normal;
+              overflow-wrap:anywhere;vertical-align:middle;line-height:1.25}
+.sum-table td:first-child{vertical-align:top;overflow-wrap:anywhere}
+.sum-table td:first-child b{white-space:nowrap}
+.ticker-company{font-size:10px;color:var(--sub);white-space:normal;
+                overflow-wrap:anywhere;line-height:1.2}
+.sum-table .col-resizer{position:absolute;right:0;top:0;width:7px;height:100%;
+                        cursor:col-resize;z-index:20}
+.sum-table .col-resizer:hover,.sum-table .col-resizer.active{
+  background:var(--cyan);opacity:.8}
 .sum-table tr:hover td{background:#1c2128}
 .rsi-stack{display:flex;flex-direction:column;align-items:center;line-height:1.2}
 .rsi-stack .rv{font-weight:600;font-size:12px}
@@ -2604,7 +2642,7 @@ function rowHTML(s){
   const _rsiCrossTags = rsiCrossoverTags(s);
   return `<tr class="sum-row">
   <td><b style="color:var(--cyan)">${esc(s.ticker)}</b> ${frTag}${n50Tag}${smeTag}
-      <div style="font-size:10px;color:var(--sub)">${esc(s.company.substring(0,28))}</div>
+      <div class="ticker-company">${esc(s.company)}</div>
       <div style="font-size:10px;color:var(--gold);font-weight:600">${fmtINR(s.close)}</div>
       ${foTag?`<span style="margin-left:2px">${foTag}</span>`:''}
       ${tblSecTags?`<div style="margin-top:2px">${tblSecTags}</div>`:''}
@@ -2982,6 +3020,108 @@ function clearAll(){
   applyFilters();
 }
 
+// ─── User-controlled table layout ─────────────────────────────────
+const TABLE_LAYOUT_KEY='rsi-mtf-table-layout-v1';
+const TABLE_LAYOUT_DEFAULTS={ticker:190,rowHeight:42,columns:{}};
+let tableLayout={ticker:190,rowHeight:42,columns:{}};
+
+function saveTableLayout(){
+  try{ localStorage.setItem(TABLE_LAYOUT_KEY,JSON.stringify(tableLayout)); }catch(_){}
+}
+function loadTableLayout(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(TABLE_LAYOUT_KEY)||'null');
+    if(saved&&typeof saved==='object'){
+      tableLayout={
+        ticker:Number(saved.ticker)||TABLE_LAYOUT_DEFAULTS.ticker,
+        rowHeight:Number(saved.rowHeight)||TABLE_LAYOUT_DEFAULTS.rowHeight,
+        columns:(saved.columns&&typeof saved.columns==='object')?saved.columns:{}
+      };
+    }
+  }catch(_){}
+}
+function tableCol(key){
+  return Array.from(document.querySelectorAll('#sumtable col[data-col-key]'))
+    .find(col=>col.dataset.colKey===key);
+}
+function updateLayoutLabels(){
+  const tw=document.getElementById('tickerWidthValue');
+  const rh=document.getElementById('rowHeightValue');
+  if(tw) tw.textContent=`${tableLayout.ticker}px`;
+  if(rh) rh.textContent=`${tableLayout.rowHeight}px`;
+  const twInput=document.getElementById('tickerWidthRange');
+  const rhInput=document.getElementById('rowHeightRange');
+  if(twInput) twInput.value=tableLayout.ticker;
+  if(rhInput) rhInput.value=tableLayout.rowHeight;
+}
+function setTickerWidth(value,persist=true){
+  const width=Math.max(130,Math.min(360,Number(value)||TABLE_LAYOUT_DEFAULTS.ticker));
+  tableLayout.ticker=width;
+  document.documentElement.style.setProperty('--ticker-col-width',`${width}px`);
+  const col=tableCol('ticker');
+  if(col) col.style.width=`${width}px`;
+  updateLayoutLabels();
+  if(persist) saveTableLayout();
+}
+function setTableRowHeight(value,persist=true){
+  const height=Math.max(30,Math.min(84,Number(value)||TABLE_LAYOUT_DEFAULTS.rowHeight));
+  tableLayout.rowHeight=height;
+  document.documentElement.style.setProperty('--table-row-height',`${height}px`);
+  updateLayoutLabels();
+  if(persist) saveTableLayout();
+}
+function setColumnWidth(key,value,persist=true){
+  const min=key==='ticker'?130:55;
+  const width=Math.max(min,Math.min(500,Number(value)||min));
+  const col=tableCol(key);
+  if(col) col.style.width=`${width}px`;
+  if(key==='ticker') tableLayout.ticker=width;
+  else tableLayout.columns[key]=width;
+  if(key==='ticker') updateLayoutLabels();
+  if(persist) saveTableLayout();
+}
+function resetTableLayout(){
+  tableLayout={ticker:TABLE_LAYOUT_DEFAULTS.ticker,rowHeight:TABLE_LAYOUT_DEFAULTS.rowHeight,columns:{}};
+  document.querySelectorAll('#sumtable col[data-col-key]').forEach(col=>{col.style.width='';});
+  setTickerWidth(tableLayout.ticker,false);
+  setTableRowHeight(tableLayout.rowHeight,false);
+  saveTableLayout();
+}
+function applyTableLayout(){
+  setTickerWidth(tableLayout.ticker,false);
+  setTableRowHeight(tableLayout.rowHeight,false);
+  Object.entries(tableLayout.columns||{}).forEach(([key,width])=>{
+    if(key!=='ticker') setColumnWidth(key,width,false);
+  });
+  updateLayoutLabels();
+}
+function bindColumnResizers(){
+  document.querySelectorAll('#sumtable th[data-col] .col-resizer').forEach(grip=>{
+    const th=grip.closest('th');
+    const key=th?.dataset.col;
+    if(!th||!key) return;
+    grip.addEventListener('click',event=>event.stopPropagation());
+    grip.addEventListener('pointerdown',event=>{
+      event.preventDefault();
+      event.stopPropagation();
+      const startX=event.clientX;
+      const startWidth=th.getBoundingClientRect().width;
+      grip.classList.add('active');
+      document.body.style.cursor='col-resize';
+      const move=ev=>setColumnWidth(key,startWidth+(ev.clientX-startX),false);
+      const stop=()=>{
+        document.removeEventListener('pointermove',move);
+        document.removeEventListener('pointerup',stop);
+        grip.classList.remove('active');
+        document.body.style.cursor='';
+        saveTableLayout();
+      };
+      document.addEventListener('pointermove',move);
+      document.addEventListener('pointerup',stop,{once:true});
+    });
+  });
+}
+
 // ─── Filter chips ─────────────────────────────────────────────────
 const CAP_LABELS={'cap-large':'Large Cap','cap-mid':'Mid Cap','cap-small':'Small Cap','cap-micro':'Micro Cap'};
 const ATH_LABELS={at:'🏆 At ATH',w5:'✅ Within 5% ATH',w10:'🟡 Within 10% ATH',w20:'🟠 Within 20% ATH',far:'📉 >20% below ATH'};
@@ -3006,6 +3146,9 @@ function renderChips(){
 
 // ─── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
+  loadTableLayout();
+  applyTableLayout();
+  bindColumnResizers();
   filtered = STOCKS.slice();
   // Update count display
   const _rc = document.getElementById('rc');
@@ -3206,19 +3349,19 @@ def build_summary_table() -> str:
             f'{lbl} <span class="sort-ind">↕</span>'
             f'<i class="tip-icon">?</i>'
             f'<div class="col-tooltip">{tooltip_html}</div>'
-            f'</span></th>'
+            f'</span><span class="col-resizer" role="separator" aria-label="Resize {lbl} column"></span></th>'
         )
 
-    def th_plain(lbl, tooltip_html, tip_left=False):
+    def th_plain(lbl, col, tooltip_html, tip_left=False):
         """Non-sortable header with hover tooltip."""
         wrap_cls = "th-wrap tip-left" if tip_left else "th-wrap"
         return (
-            f'<th style="text-align:center">'
+            f'<th data-col="{col}" style="text-align:center">'
             f'<span class="{wrap_cls}">'
             f'{lbl}'
             f'<i class="tip-icon">?</i>'
             f'<div class="col-tooltip">{tooltip_html}</div>'
-            f'</span></th>'
+            f'</span><span class="col-resizer" role="separator" aria-label="Resize {lbl} column"></span></th>'
         )
 
     # ── Tooltip content for each column ──────────────────────────────────────
@@ -3408,12 +3551,37 @@ def build_summary_table() -> str:
       Click again to toggle ▲▼ &nbsp;|&nbsp; Shows {PAGE_TBL} rows per page &nbsp;|&nbsp;
       Hover <b>?</b> on any column for guidance
     </div>
+    <div class="table-layout-tools" aria-label="Table layout controls">
+      <span style="font-weight:700;color:var(--text)">TABLE LAYOUT</span>
+      <label class="layout-tool" for="tickerWidthRange">
+        Ticker / Company width
+        <input id="tickerWidthRange" type="range" min="130" max="360" step="5" value="190"
+               oninput="setTickerWidth(this.value)">
+        <output id="tickerWidthValue" class="layout-value">190px</output>
+      </label>
+      <label class="layout-tool" for="rowHeightRange">
+        Row height
+        <input id="rowHeightRange" type="range" min="30" max="84" step="2" value="42"
+               oninput="setTableRowHeight(this.value)">
+        <output id="rowHeightValue" class="layout-value">42px</output>
+      </label>
+      <button class="layout-reset" type="button" onclick="resetTableLayout()">Reset</button>
+      <span class="layout-help">Drag any header edge to resize that column · settings are saved on this device</span>
+    </div>
     <div class="table-wrap">
       <table class="sum-table" id="sumtable">
+        <colgroup>
+          <col data-col-key="ticker"><col data-col-key="phase"><col data-col-key="signal">
+          <col data-col-key="score"><col data-col-key="rsid"><col data-col-key="rsiw">
+          <col data-col-key="rsim"><col data-col-key="cci"><col data-col-key="macd">
+          <col data-col-key="close"><col data-col-key="dist52"><col data-col-key="mcap">
+          <col data-col-key="donchd"><col data-col-key="donchw"><col data-col-key="donchm">
+          <col data-col-key="rn50"><col data-col-key="runiv">
+        </colgroup>
         <thead><tr>
           {th('Ticker / Company', 'ticker', TIP_TICKER, 'left')}
-          {th_plain('Phase',     TIP_PHASE)}
-          {th_plain('Signal',    TIP_SIGNAL)}
+          {th_plain('Phase',     'phase', TIP_PHASE)}
+          {th_plain('Signal',    'signal', TIP_SIGNAL)}
           {th('Score',   'score',  TIP_SCORE)}
           {th('D-RSI/SMA','rsid', TIP_DRSI)}
           {th('W-RSI',    'rsiw', TIP_WRSI)}
@@ -3422,7 +3590,7 @@ def build_summary_table() -> str:
           {th('D-MACD',   'macd', TIP_MACD)}
           {th('Close',    'close',TIP_CLOSE)}
           {th('52W%',   'dist52', TIP_52W)}
-          {th_plain('Market Cap', TIP_MCAP)}
+          {th_plain('Market Cap', 'mcap', TIP_MCAP)}
           {th('D-Donch', 'donchd', TIP_DONCH_D)}
           {th('W-Donch', 'donchw', TIP_DONCH_W)}
           {th('M-Donch', 'donchm', TIP_DONCH_M, tip_left=True)}
