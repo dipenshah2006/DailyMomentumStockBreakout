@@ -17,6 +17,7 @@ import math
 import warnings
 from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,7 @@ MIN_PRICE      = 20
 MIN_AVG_VOL    = 50_000
 TOP_N          = 12        # picks per section
 PAGES_BASE     = "https://dipenshah2006.github.io/DailyMomentumStockBreakout"
+IST            = ZoneInfo("Asia/Kolkata")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ def calc_rsi(series: pd.Series, period: int = 14) -> float:
 
 
 def week_range() -> str:
-    today = date.today()
+    today = datetime.now(IST).date()
     mon   = today - timedelta(days=today.weekday())
     fri   = mon + timedelta(days=4)
     return f"{mon.strftime('%d %b')} – {fri.strftime('%d %b %Y')}"
@@ -290,7 +292,7 @@ def section_table(title: str, emoji: str, rows_html: str, col7_label: str, href:
 
 # ── HTML builder ──────────────────────────────────────────────────────────────
 def build_html(results: list[dict]) -> str:
-    run_ts   = datetime.now().strftime("%d %b %Y  %H:%M IST")
+    run_ts   = datetime.now(IST).strftime("%d %b %Y  %H:%M IST")
     wk_range = week_range()
     n_total  = len(results)
 
@@ -456,7 +458,7 @@ a{{color:inherit;text-decoration:none}}
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"=== NSE Weekly Digest  {datetime.now().strftime('%d %b %Y %H:%M')} ===")
+    print(f"=== NSE Weekly Digest  {datetime.now(IST).strftime('%d %b %Y %H:%M IST')} ===")
     universe = load_universe()
     print(f"Universe: {len(universe)} stocks")
 

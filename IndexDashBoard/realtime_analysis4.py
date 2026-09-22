@@ -1,6 +1,7 @@
 import os, re, json, sys, time, warnings, pickle, logging
 import plotly.io as pio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -11,6 +12,7 @@ import plotly.graph_objects as go
 from plotly.utils import PlotlyJSONEncoder
 
 warnings.filterwarnings("ignore")
+IST = ZoneInfo("Asia/Kolkata")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger()
 yf_logger = logging.getLogger("yfinance")
@@ -1479,7 +1481,7 @@ def generate_html(index_summary, constituents_detail, charts_paths,
     <meta charset="UTF-8">
     {meta_refresh}
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NSE Index Analysis{"  (Live)" if refresh_seconds else ""} – {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</title>
+    <title>NSE Index Analysis{"  (Live)" if refresh_seconds else ""} – {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.datatables.net/1.13.4/css/dataTables.bootstrap5.min.css" rel="stylesheet">
     <script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
@@ -1511,7 +1513,7 @@ def generate_html(index_summary, constituents_detail, charts_paths,
 <body>
     <h2 class="mb-1">📊 NSE Indices — Multi-Timeframe Technical Analysis</h2>
     <p class="text-muted small mb-3">
-        Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;|&nbsp;
+        Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')} &nbsp;|&nbsp;
         Indices: {len(index_summary)} &nbsp;|&nbsp;
         {"🟢 Live Mode" if refresh_seconds else "🔵 Static Mode"}
     </p>

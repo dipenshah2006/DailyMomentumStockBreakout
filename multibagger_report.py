@@ -21,13 +21,17 @@ import threading
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from zoneinfo import ZoneInfo
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+
+
+IST = ZoneInfo("Asia/Kolkata")
 
 warnings.filterwarnings('ignore')
 
@@ -1111,9 +1115,10 @@ def chart_is_fresh(path):
     """Return True if the PNG was written today (IST midnight or later)."""
     if not path.exists():
         return False
-    ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    today_midnight = datetime(ist_now.year, ist_now.month, ist_now.day)
-    return datetime.fromtimestamp(path.stat().st_mtime) >= today_midnight
+    ist_now = datetime.now(IST)
+    today_midnight = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    file_time = datetime.fromtimestamp(path.stat().st_mtime, IST)
+    return file_time >= today_midnight
 
 
 def add_indicators(df):
@@ -2999,7 +3004,7 @@ def push_to_github():
         subprocess.run(['git', 'add', REPORT_HTML, TRADES_REPORT_HTML, str(CHARTS_DIR)],
                        check=False, env=env, capture_output=True)
         subprocess.run(['git', 'add', '-A'], check=False, env=env, capture_output=True)
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+        now_str = datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')
         result = subprocess.run(
             ['git', 'commit', '-m', f'multibagger: full scan + Darvas + Blast {now_str}'],
             check=False, env=env, capture_output=True, text=True
@@ -3082,7 +3087,7 @@ def main():
     tprint("  Loading shared RSI-MTF cache…")
     _load_shared_cache()
     tprint(f"  Shared cache: {len(_SHARED_CACHE):,} stocks pre-loaded (skips yfinance for these)")
-    ist_now   = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    ist_now   = datetime.now(IST)
     scan_time = ist_now.strftime('%Y-%m-%d %H:%M IST')
     today_str = ist_now.strftime('%Y-%m-%d')
 

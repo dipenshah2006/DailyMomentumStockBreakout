@@ -20,12 +20,14 @@ import warnings
 import math
 from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 warnings.filterwarnings("ignore")
+IST = ZoneInfo("Asia/Kolkata")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 LOCAL_NSE_CSV   = "india/NSE/NSECash/EQUITY_L.csv"
@@ -116,7 +118,7 @@ def load_universe() -> list[dict]:
 def analyse(sym: str, name: str, fo: bool) -> dict | None:
     yf_sym = sym + ".NS"
     try:
-        today = date.today()
+        today = datetime.now(IST).date()
 
         # Daily data: last 30 days for RSI + PDH
         df_d = yf.download(
@@ -177,7 +179,8 @@ def analyse(sym: str, name: str, fo: bool) -> dict | None:
             price_vs_orh  = pct(last_price, or_high)
 
         # Expected intraday volume by now (linear extrapolation over 375-min session)
-        now_min = datetime.now().hour * 60 + datetime.now().minute
+        now = datetime.now(IST)
+        now_min = now.hour * 60 + now.minute
         market_start_min = 9 * 60 + 15   # 9:15 AM
         market_end_min   = 15 * 60 + 30  # 3:30 PM
         elapsed = max(1, now_min - market_start_min)
@@ -292,7 +295,7 @@ def score_bar(s: int) -> str:
 
 
 def build_html(results: list[dict]) -> str:
-    run_ts   = datetime.now().strftime("%d %b %Y  %H:%M IST")
+    run_ts   = datetime.now(IST).strftime("%d %b %Y  %H:%M IST")
     n_total  = len(results)
     n_pdh    = sum(1 for r in results if r["pdh_breakout"])
     n_vwap   = sum(1 for r in results if r["vwap_breakout"])
@@ -492,7 +495,7 @@ function thSort(col) {{
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"=== NSE Intraday Breakout Report  {datetime.now().strftime('%d %b %Y %H:%M')} ===")
+    print(f"=== NSE Intraday Breakout Report  {datetime.now(IST).strftime('%d %b %Y %H:%M IST')} ===")
     universe = load_universe()
     print(f"Universe: {len(universe)} stocks")
 

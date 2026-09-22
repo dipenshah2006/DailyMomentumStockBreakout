@@ -240,7 +240,7 @@ def analyse(symbol, name, cache):
         if df is not None:
             df = _refresh_stale_cached_df(yf_sym, df)
         if df is None:
-            end   = datetime.today()
+            end   = datetime.now(IST)
             start = end - timedelta(days=DATA_YEARS * 365 + 60)
             df = yf.download(
                 yf_sym,
@@ -690,7 +690,7 @@ document.addEventListener('DOMContentLoaded', () => {{
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    now = datetime.now()
+    now = datetime.now(IST)
     run_ts = now.strftime("%d %b %Y %H:%M") + " " + IST_OFFSET
 
     print("=" * 60)

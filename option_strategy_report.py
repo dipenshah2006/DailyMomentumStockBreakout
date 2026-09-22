@@ -17,11 +17,15 @@ import re
 import time
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+
+
+IST = ZoneInfo("Asia/Kolkata")
 
 from TradingViewTypeCharts.indicators import (
     fibonacci_levels,
@@ -315,14 +319,14 @@ def _strategy(
         "breakevens": [round(x, 2) for x in breakevens],
         "rationale": rationale,
         "status": "OPEN",
-        "entry_date": date.today().isoformat(),
+        "entry_date": datetime.now(IST).date().isoformat(),
         "current_pnl": 0.0,
         "last_spot": round(spot, 2),
     }
 
 
 def _build_candidates(chain: dict, contexts: dict, lot_size: int) -> list[dict]:
-    today = date.today()
+    today = datetime.now(IST).date()
     expiries = [x for x in chain["expiries"] if _parse_expiry(x) >= today]
     if not expiries:
         raise RuntimeError("NSE option chain has no current or future expiries")
@@ -474,7 +478,7 @@ def _expiry_payoff(trade: dict, spot: float) -> float:
 
 def _update_paper_trades(candidates: list[dict], chain: dict, spot: float) -> tuple[list[dict], list[dict]]:
     state = _load_state()
-    today = date.today()
+    today = datetime.now(IST).date()
     candidate_by_id = {x["trade_id"]: x for x in candidates}
     open_trades = []
     closed = list(state.get("closed", []))
@@ -524,7 +528,7 @@ def _update_paper_trades(candidates: list[dict], chain: dict, spot: float) -> tu
         "version": 1,
         "open": open_trades,
         "closed": closed[:100],
-        "updated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "updated_at": datetime.now(IST).replace(microsecond=0).isoformat(),
     }
     STATE_FILE.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
     return open_trades, state["closed"]
@@ -638,7 +642,7 @@ th,td{{padding:9px 10px;border-bottom:1px solid #e8edf3;text-align:left;white-sp
 footer{{margin-top:30px;color:#637083;font-size:.85rem}}
 </style></head><body><main>
 <h1>NIFTY Option Strategy Paper Trade Report</h1>
-<p class="muted">Generated {esc(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))} · Spot ₹{spot:,.2f} · Lot size assumption: {lot_size}</p>
+<p class="muted">Generated {esc(datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST'))} · Spot ₹{spot:,.2f} · Lot size assumption: {lot_size}</p>
 <div class="notice"><b>Paper trading only:</b> These are analytical scenarios, not orders or investment advice.
 Prices use NSE option-chain marks; slippage, brokerage, taxes, liquidity and gap risk are not included.
 “Max profit” is the expiry payoff ceiling for defined-risk spreads/condors. A long straddle has unlimited upside but a defined debit risk.</div>

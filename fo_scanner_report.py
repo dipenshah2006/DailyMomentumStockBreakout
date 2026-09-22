@@ -31,8 +31,12 @@ Output
 import os, sys, csv, io, time, pickle, logging, warnings, traceback
 import concurrent.futures
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 
 import numpy as np
+
+
+IST = ZoneInfo("Asia/Kolkata")
 import pandas as pd
 import yfinance as yf
 import matplotlib
@@ -163,7 +167,7 @@ def _load_fo_list():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _last_trading_day_str() -> str:
-    d = date.today()
+    d = datetime.now(IST).date()
     if d.weekday() == 5:
         d -= timedelta(days=1)
     elif d.weekday() == 6:
@@ -763,7 +767,7 @@ def draw_daily_chart(res: dict, out_path: str):
                edgecolor=_GRID, labelcolor=_TEXT, ncol=4)
     ax1.set_title(
         f"{res['sym']}  ₹{res['close']:.2f}  |  Score {res['score']}/100  "
-        f"|  {res['signal']}  |  {date.today().isoformat()}",
+        f"|  {res['signal']}  |  {datetime.now(IST).date().isoformat()}",
         color=_TEXT, fontsize=9, pad=4)
 
     # ── RSI panel ──────────────────────────────────────────────────────────
@@ -1037,12 +1041,7 @@ footer{{text-align:center;color:#334155;font-size:0.73rem;margin-top:40px;paddin
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    try:
-        import pytz
-        IST = pytz.timezone("Asia/Kolkata")
-        gen_time = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
-    except ImportError:
-        gen_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    gen_time = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
 
     log.info("=" * 65)
     log.info("F&O MULTI-INDICATOR SCANNER")
