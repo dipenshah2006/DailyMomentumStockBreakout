@@ -111,18 +111,18 @@ def rsi(series, period=14):
     avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
     rs = avg_gain / avg_loss
-    return (100 - (100 / (1 + rs))).squeeze()
+    return 100 - (100 / (1 + rs))
 
 def macd(series, fast, slow, signal):
     exp1 = series.ewm(span=fast, adjust=False).mean()
     exp2 = series.ewm(span=slow, adjust=False).mean()
-    macd_line = (exp1 - exp2).squeeze()
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean().squeeze()
-    histogram = (macd_line - signal_line).squeeze()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
 
 def sma(series, period):
-    return series.rolling(window=period, min_periods=period).mean().squeeze()
+    return series.rolling(window=period, min_periods=period).mean()
 
 def _scalar(val):
     """Extract a plain Python scalar from a pandas Series/DataFrame or numpy scalar."""

@@ -1008,6 +1008,7 @@ jobs:
 
       - name: Send RSI daily summary email
         if: needs.rsi-report.result == 'success'
+        id: email_rsi
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1016,9 +1017,11 @@ jobs:
           EMAIL_DRY_RUN:      ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
           EMAIL_BCC_BATCH:    '100'
         run: python send_report_email.py
+        continue-on-error: true
 
       - name: Send Rocket Scanner email
         if: needs.rocket-report.result == 'success'
+        id: email_rocket
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1036,9 +1039,11 @@ jobs:
           DATE=$(date +'%d %b %Y')
           echo "🚀 NSE Rocket Scanner — Breakout Candidates ${DATE}" > rocket_subject.txt
           python send_report_email.py
+        continue-on-error: true
 
       - name: Send ATH Breakout email
         if: needs.ath-report.result == 'success'
+        id: email_ath
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1056,9 +1061,11 @@ jobs:
           DATE=$(date +'%d %b %Y')
           echo "🏆 NSE ATH Breakout Report — ${DATE}" > ath_subject.txt
           python send_report_email.py
+        continue-on-error: true
 
       - name: Send Index Dashboard email
         if: needs.index-dashboard.result == 'success'
+        id: email_index
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1076,9 +1083,11 @@ jobs:
           DATE=$(date +'%d %b %Y')
           echo "📊 NSE Index Dashboard — ${DATE}" > index_dashboard_subject.txt
           python send_report_email.py
+        continue-on-error: true
 
       - name: Send ASX Screener email
         if: needs.asx-report.result == 'success'
+        id: email_asx
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1096,9 +1105,11 @@ jobs:
           DATE=$(date +'%d %b %Y')
           echo "🦘 ASX Screener Report — ${DATE}" > asx_subject.txt
           python send_report_email.py
+        continue-on-error: true
 
       - name: Send USA / NYSE Screener email
         if: needs.usa-report.result == 'success'
+        id: email_usa
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1116,9 +1127,11 @@ jobs:
           DATE=$(date +'%d %b %Y')
           echo "🇺🇸 USA / NYSE Screener Report — ${DATE}" > usa_subject.txt
           python send_report_email.py
+        continue-on-error: true
 
       - name: Generate and send Weekly Digest (Sat & Sun only)
         if: needs.rsi-report.result == 'success'
+        id: email_weekly
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1140,9 +1153,11 @@ jobs:
           else
             echo "Not weekend — skipping weekly digest (day=$DAY)"
           fi
+        continue-on-error: true
 
       - name: Send failure notification (RSI failed)
         if: needs.rsi-report.result == 'failure'
+        id: email_failure
         env:
           GMAIL_USERNAME:     dipenshah2006@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -1154,3 +1169,32 @@ jobs:
           GITHUB_RUN_NUMBER:  ${{ github.run_number }}
           GITHUB_REPOSITORY:  ${{ github.repository }}
         run: python send_report_email.py
+        continue-on-error: true
+
+      - name: Report email delivery failures after all send attempts
+        if: always()
+        env:
+          RSI_EMAIL_OUTCOME: ${{ steps.email_rsi.outcome }}
+          ROCKET_EMAIL_OUTCOME: ${{ steps.email_rocket.outcome }}
+          ATH_EMAIL_OUTCOME: ${{ steps.email_ath.outcome }}
+          INDEX_EMAIL_OUTCOME: ${{ steps.email_index.outcome }}
+          ASX_EMAIL_OUTCOME: ${{ steps.email_asx.outcome }}
+          USA_EMAIL_OUTCOME: ${{ steps.email_usa.outcome }}
+          WEEKLY_EMAIL_OUTCOME: ${{ steps.email_weekly.outcome }}
+          FAILURE_EMAIL_OUTCOME: ${{ steps.email_failure.outcome }}
+        run: |
+          failures=()
+          if [[ "$RSI_EMAIL_OUTCOME" == "failure" ]]; then failures+=("RSI summary"); fi
+          if [[ "$ROCKET_EMAIL_OUTCOME" == "failure" ]]; then failures+=("Rocket"); fi
+          if [[ "$ATH_EMAIL_OUTCOME" == "failure" ]]; then failures+=("ATH"); fi
+          if [[ "$INDEX_EMAIL_OUTCOME" == "failure" ]]; then failures+=("Index Dashboard"); fi
+          if [[ "$ASX_EMAIL_OUTCOME" == "failure" ]]; then failures+=("ASX"); fi
+          if [[ "$USA_EMAIL_OUTCOME" == "failure" ]]; then failures+=("USA / NYSE"); fi
+          if [[ "$WEEKLY_EMAIL_OUTCOME" == "failure" ]]; then failures+=("Weekly Digest"); fi
+          if [[ "$FAILURE_EMAIL_OUTCOME" == "failure" ]]; then failures+=("Failure notification"); fi
+
+          if (( ${#failures[@]} > 0 )); then
+            echo "::error::One or more email steps failed: ${failures[*]}"
+            exit 1
+          fi
+          echo "All eligible email steps completed."

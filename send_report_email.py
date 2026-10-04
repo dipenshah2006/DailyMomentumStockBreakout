@@ -33,6 +33,8 @@ DEFAULT_BODY_FILE = "email_summary.html"
 DEFAULT_SUBJECT_FILE = "email_subject.txt"
 SMTP_HOST         = "smtp.gmail.com"
 SMTP_PORT         = 465
+SMTP_CONNECT_TIMEOUT_SECONDS = 30
+SMTP_CONNECT_RETRY_DELAYS = (1, 2)
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -122,6 +124,45 @@ def chunks(lst: list, size: int):
         yield lst[i : i + size]
 
 
+def connect_smtp_with_retry() -> smtplib.SMTP_SSL:
+    """Open and authenticate SMTP, retrying only transient connection failures."""
+    attempts = len(SMTP_CONNECT_RETRY_DELAYS) + 1
+
+    for attempt in range(1, attempts + 1):
+        smtp = None
+        try:
+            smtp = smtplib.SMTP_SSL(
+                SMTP_HOST,
+                SMTP_PORT,
+                timeout=SMTP_CONNECT_TIMEOUT_SECONDS,
+            )
+            smtp.login(USERNAME, PASSWORD)
+            print("✅ Authenticated")
+            return smtp
+        except smtplib.SMTPAuthenticationError:
+            if smtp is not None:
+                smtp.close()
+            raise
+        except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as exc:
+            if smtp is not None:
+                smtp.close()
+            if attempt == attempts:
+                raise
+
+            delay = SMTP_CONNECT_RETRY_DELAYS[attempt - 1]
+            print(
+                f"⚠️ SMTP connection attempt {attempt}/{attempts} failed: "
+                f"{exc}; retrying in {delay}s"
+            )
+            time.sleep(delay)
+        except Exception:
+            if smtp is not None:
+                smtp.close()
+            raise
+
+    raise RuntimeError("SMTP connection retries ended without a result")
+
+
 # ── Senders ───────────────────────────────────────────────────────────────────
 
 def send_bcc_batches(smtp: smtplib.SMTP_SSL, sender: str, recipients: list[str],
@@ -206,10 +247,8 @@ def main():
 
     print(f"🔐 Connecting to {SMTP_HOST}:{SMTP_PORT}…")
     try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as smtp:
-            smtp.login(USERNAME, PASSWORD)
-            print("✅ Authenticated")
-
+        smtp = connect_smtp_with_retry()
+        with smtp:
             if SEND_MODE == "individual":
                 sent = send_individual(smtp, USERNAME, recipients, subject, html)
             else:

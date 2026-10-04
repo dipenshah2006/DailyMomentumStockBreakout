@@ -1,4 +1,6 @@
 - [Full NSE Scanner](nse-scanner.md) — multibagger_report.py now scans 2657 stocks (NSE Cash + SME) with Darvas, Blast, S/R, trend channels; charts saved as PNGs to charts/multibagger/
+- [Dashboard indicator shape](index-dashboard-indicator-shape.md) — keep RSI/MACD/SMA results sequence-shaped so one-sample inputs do not collapse to scalars
+- [Report email failure handling](report-email-failure-handling.md) — retry SMTP before sending; continue eligible reports, then fail the run if any delivery step failed
 - [ASX CI validation](asx-ci-validation.md) — per-ticker exceptions can produce a green process but empty report; smoke-test a real .AX symbol through analyze_stock()
 - [MonthlyTrend CI](monthlytrend-ci.md) — PyArrow is required for the per-symbol parquet cache to persist between daily runs
 - [Python post-merge setup](python-post-merge.md) — Nix’s externally managed Python requires non-interactive pip installs to use the supported override
