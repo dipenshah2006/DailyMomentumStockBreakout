@@ -21,6 +21,7 @@ Optional env vars:
 
 import os
 import smtplib
+import ssl
 import sys
 import time
 from email.mime.multipart import MIMEMultipart
@@ -33,6 +34,8 @@ DEFAULT_BODY_FILE = "email_summary.html"
 DEFAULT_SUBJECT_FILE = "email_subject.txt"
 SMTP_HOST         = "smtp.gmail.com"
 SMTP_PORT         = 465
+SMTP_STARTTLS_PORT = 587
+SMTP_TRANSPORTS   = (("STARTTLS", SMTP_STARTTLS_PORT), ("SSL", SMTP_PORT))
 SMTP_CONNECT_TIMEOUT_SECONDS = 30
 SMTP_CONNECT_RETRY_DELAYS = (1, 2)
 
@@ -124,48 +127,69 @@ def chunks(lst: list, size: int):
         yield lst[i : i + size]
 
 
-def connect_smtp_with_retry() -> smtplib.SMTP_SSL:
-    """Open and authenticate SMTP, retrying only transient connection failures."""
+def connect_smtp_with_retry() -> smtplib.SMTP:
+    """Open and authenticate SMTP, retrying transient failures across Gmail transports."""
     attempts = len(SMTP_CONNECT_RETRY_DELAYS) + 1
 
-    for attempt in range(1, attempts + 1):
-        smtp = None
-        try:
-            smtp = smtplib.SMTP_SSL(
-                SMTP_HOST,
-                SMTP_PORT,
-                timeout=SMTP_CONNECT_TIMEOUT_SECONDS,
-            )
-            smtp.login(USERNAME, PASSWORD)
-            print("✅ Authenticated")
-            return smtp
-        except smtplib.SMTPAuthenticationError:
-            if smtp is not None:
-                smtp.close()
-            raise
-        except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as exc:
-            if smtp is not None:
-                smtp.close()
-            if attempt == attempts:
-                raise
+    for transport_index, (transport, port) in enumerate(SMTP_TRANSPORTS):
+        print(f"🔐 Connecting to {SMTP_HOST}:{port} via {transport}…")
 
-            delay = SMTP_CONNECT_RETRY_DELAYS[attempt - 1]
-            print(
-                f"⚠️ SMTP connection attempt {attempt}/{attempts} failed: "
-                f"{exc}; retrying in {delay}s"
-            )
-            time.sleep(delay)
-        except Exception:
-            if smtp is not None:
-                smtp.close()
-            raise
+        for attempt in range(1, attempts + 1):
+            smtp = None
+            try:
+                if transport == "STARTTLS":
+                    smtp = smtplib.SMTP(
+                        SMTP_HOST,
+                        port,
+                        timeout=SMTP_CONNECT_TIMEOUT_SECONDS,
+                    )
+                    smtp.starttls(context=ssl.create_default_context())
+                else:
+                    smtp = smtplib.SMTP_SSL(
+                        SMTP_HOST,
+                        port,
+                        timeout=SMTP_CONNECT_TIMEOUT_SECONDS,
+                    )
+
+                smtp.login(USERNAME, PASSWORD)
+                print("✅ Authenticated")
+                return smtp
+            except smtplib.SMTPAuthenticationError:
+                if smtp is not None:
+                    smtp.close()
+                raise
+            except (smtplib.SMTPException, TimeoutError, OSError) as exc:
+                if smtp is not None:
+                    smtp.close()
+
+                if attempt < attempts:
+                    delay = SMTP_CONNECT_RETRY_DELAYS[attempt - 1]
+                    print(
+                        f"⚠️ SMTP {transport} connection attempt "
+                        f"{attempt}/{attempts} failed: {exc}; retrying in {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+
+                if transport_index + 1 < len(SMTP_TRANSPORTS):
+                    next_transport, next_port = SMTP_TRANSPORTS[transport_index + 1]
+                    print(
+                        f"⚠️ SMTP {transport} failed after {attempts} attempts; "
+                        f"trying {next_transport} on port {next_port}"
+                    )
+                    break
+                raise
+            except Exception:
+                if smtp is not None:
+                    smtp.close()
+                raise
 
     raise RuntimeError("SMTP connection retries ended without a result")
 
 
 # ── Senders ───────────────────────────────────────────────────────────────────
 
-def send_bcc_batches(smtp: smtplib.SMTP_SSL, sender: str, recipients: list[str],
+def send_bcc_batches(smtp: smtplib.SMTP, sender: str, recipients: list[str],
                      subject: str, html: str) -> int:
     """Send one email per BCC_BATCH with recipients hidden from each other."""
     sent = 0
@@ -190,7 +214,7 @@ def send_bcc_batches(smtp: smtplib.SMTP_SSL, sender: str, recipients: list[str],
     return sent
 
 
-def send_individual(smtp: smtplib.SMTP_SSL, sender: str, recipients: list[str],
+def send_individual(smtp: smtplib.SMTP, sender: str, recipients: list[str],
                     subject: str, html: str) -> int:
     """Send one email per recipient — each person sees only their own address."""
     sent = 0
@@ -245,7 +269,6 @@ def main():
         print("✅ Dry run complete — no emails sent.")
         return
 
-    print(f"🔐 Connecting to {SMTP_HOST}:{SMTP_PORT}…")
     try:
         smtp = connect_smtp_with_retry()
         with smtp:

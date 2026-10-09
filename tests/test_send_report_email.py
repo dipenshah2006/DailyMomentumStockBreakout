@@ -14,7 +14,7 @@ class SMTPConnectionRetryTests(unittest.TestCase):
                 patch.object(emailer, "PASSWORD", "test-app-password"), \
                 patch.object(
                     emailer.smtplib,
-                    "SMTP_SSL",
+                    "SMTP",
                     side_effect=[disconnect, disconnect, smtp],
                 ) as smtp_factory, \
                 patch.object(emailer.time, "sleep") as sleep:
@@ -26,10 +26,11 @@ class SMTPConnectionRetryTests(unittest.TestCase):
             smtp_factory.call_args,
             call(
                 emailer.SMTP_HOST,
-                emailer.SMTP_PORT,
+                emailer.SMTP_STARTTLS_PORT,
                 timeout=emailer.SMTP_CONNECT_TIMEOUT_SECONDS,
             ),
         )
+        smtp.starttls.assert_called_once()
         self.assertEqual(smtp.login.call_args, call("sender@example.com", "test-app-password"))
         self.assertEqual(sleep.call_args_list, [call(1), call(2)])
 
@@ -39,27 +40,53 @@ class SMTPConnectionRetryTests(unittest.TestCase):
 
         with patch.object(emailer, "USERNAME", "sender@example.com"), \
                 patch.object(emailer, "PASSWORD", "bad-app-password"), \
-                patch.object(emailer.smtplib, "SMTP_SSL", return_value=smtp) as smtp_factory, \
+                patch.object(emailer.smtplib, "SMTP", return_value=smtp) as smtp_factory, \
+                patch.object(emailer.smtplib, "SMTP_SSL") as ssl_factory, \
                 patch.object(emailer.time, "sleep") as sleep:
             with self.assertRaises(smtplib.SMTPAuthenticationError):
                 emailer.connect_smtp_with_retry()
 
         smtp_factory.assert_called_once()
+        ssl_factory.assert_not_called()
         smtp.close.assert_called_once()
         sleep.assert_not_called()
 
-    def test_exhausted_connection_retries_raise_the_last_error(self):
+    def test_falls_back_to_ssl_after_starttls_retries_fail(self):
         disconnect = smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+        smtp = Mock()
 
         with patch.object(emailer, "USERNAME", "sender@example.com"), \
                 patch.object(emailer, "PASSWORD", "test-app-password"), \
-                patch.object(emailer.smtplib, "SMTP_SSL", side_effect=disconnect) as smtp_factory, \
+                patch.object(emailer.smtplib, "SMTP", side_effect=disconnect) as starttls_factory, \
+                patch.object(emailer.smtplib, "SMTP_SSL", return_value=smtp) as ssl_factory, \
                 patch.object(emailer.time, "sleep") as sleep:
-            with self.assertRaises(smtplib.SMTPServerDisconnected):
+            result = emailer.connect_smtp_with_retry()
+
+        self.assertIs(result, smtp)
+        self.assertEqual(starttls_factory.call_count, 3)
+        ssl_factory.assert_called_once_with(
+            emailer.SMTP_HOST,
+            emailer.SMTP_PORT,
+            timeout=emailer.SMTP_CONNECT_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(smtp.login.call_args, call("sender@example.com", "test-app-password"))
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_exhausted_transports_raise_the_last_error(self):
+        starttls_disconnect = smtplib.SMTPServerDisconnected("STARTTLS disconnected")
+        ssl_disconnect = smtplib.SMTPServerDisconnected("SSL disconnected")
+
+        with patch.object(emailer, "USERNAME", "sender@example.com"), \
+                patch.object(emailer, "PASSWORD", "test-app-password"), \
+                patch.object(emailer.smtplib, "SMTP", side_effect=starttls_disconnect) as starttls_factory, \
+                patch.object(emailer.smtplib, "SMTP_SSL", side_effect=ssl_disconnect) as ssl_factory, \
+                patch.object(emailer.time, "sleep") as sleep:
+            with self.assertRaisesRegex(smtplib.SMTPServerDisconnected, "SSL disconnected"):
                 emailer.connect_smtp_with_retry()
 
-        self.assertEqual(smtp_factory.call_count, 3)
-        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+        self.assertEqual(starttls_factory.call_count, 3)
+        self.assertEqual(ssl_factory.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2), call(1), call(2)])
 
 
 if __name__ == "__main__":
